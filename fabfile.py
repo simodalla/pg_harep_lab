@@ -4,15 +4,12 @@ from __future__ import unicode_literals, absolute_import
 import time
 import os.path
 
-from fabric.api import local, run, env, task, settings, hosts, open_shell, cd
-from fabric.contrib.files import exists, uncomment, append, contains, sed
-
+from fabric.api import run, env, task, settings, hosts, open_shell, cd
+from fabric.contrib.files import exists, uncomment, append, sed
 
 import vbox
-from ssh import prepare_ssh_autologin
 
 
-# env.lab = dict()
 env.lab_vm_image_name = 'ubuntu1404'
 env.lab_vm_image_snapshot = 'post_installation'
 env.user = 'root'
@@ -21,11 +18,19 @@ env.host = '192.168.59.200'
 
 SNAPSHOTS = {
     'POSTGRES_SOURCE_INSTALL': 'postgres_source_installation'}
+
+POSTGRESQL_HOSTS = {
+    'ptr': {'192.168.59.201': 'pgsimplemaster',
+            '192.168.59.202': 'pgsimpleslave'},
+}
+POSTGRESQL_USERNAME = 'postgres'
 POSTGRESQL_ROOT_PATH = '/usr/local/pgsql'
 POSTGRESQL_DATA_PATH = os.path.join(POSTGRESQL_ROOT_PATH, 'data')
 POSTGRESQL_HOME_PATH = '/home/postgresql'
 POSTGRESQL_STORAGE_PATH = '/opt/postgresql_storage'
 POSTGRESQL_LOG_PATH = '/var/log/postgresql'
+POSTGRESQL_CMD_SERVER = os.path.join(POSTGRESQL_ROOT_PATH, 'bin', 'postgres')
+POSTGRESQL_CMD_PSQL = os.path.join(POSTGRESQL_ROOT_PATH, 'bin', 'psql')
 
 
 def get_vm_ip(vm_name):
@@ -88,13 +93,15 @@ def deploy_vm_image():
     if not vbox.has_snapshot(env.lab_vm_image_name, 'postgres_user_config'):
         vbox.running_up_and_wait(env.lab_vm_image_name)
         run('adduser --quiet --disabled-password --gecos "Postgres User"'
-            ' postgres')
-        run('echo "postgres:{}" | chpasswd'.format(env.password))
+            ' {}'.format(POSTGRESQL_USERNAME))
+        run('echo "{}:{}" | chpasswd'.format(POSTGRESQL_USERNAME,
+                                             env.password))
         for path in [POSTGRESQL_DATA_PATH, POSTGRESQL_LOG_PATH,
                      POSTGRESQL_STORAGE_PATH]:
             if not exists(path):
                 run('mkdir {}'.format(path))
-            run('chown postgres:postgres {}'.format(path))
+            run('chown {postgres}:{postgres} {path}'.format(
+                postgres=POSTGRESQL_USERNAME, path=path))
 
         vbox.make_snaspshot(env.lab_vm_image_name,
                             'postgres_user_config',
@@ -103,18 +110,20 @@ def deploy_vm_image():
     if not vbox.has_snapshot(env.lab_vm_image_name,
                              'postgres_server_post_config'):
         vbox.running_up_and_wait(env.lab_vm_image_name)
-        with settings(user='postgres'):
+        with settings(user=POSTGRESQL_USERNAME):
             run('{} -D {}'.format(
                 os.path.join(POSTGRESQL_ROOT_PATH, 'bin/initdb'),
                 POSTGRESQL_DATA_PATH))
 
             pg_hba = os.path.join(POSTGRESQL_DATA_PATH, 'pg_hba.conf')
-            uncomment(pg_hba, 'local   replication     postgres')
-            uncomment(pg_hba, 'host    replication     postgres'
-                              '        127.0.0.1\/32')
+            uncomment(pg_hba, 'local   replication     {}'.format(
+                POSTGRESQL_USERNAME))
+            uncomment(pg_hba,
+                      'host    replication     {}'
+                      '        127.0.0.1\/32'.format(POSTGRESQL_USERNAME))
             for auth_conf in ['host         all  all  192.168.59.0/24  trust',
-                              'host         replication  postgres'
-                              '  192.168.59.0/24  trust']:
+                              'host         replication  {}  192.168.59.0/24'
+                              '  trust'.format(POSTGRESQL_USERNAME)]:
                 append(pg_hba, auth_conf)
 
             postgres_conf = os.path.join(POSTGRESQL_DATA_PATH,
@@ -176,11 +185,28 @@ def slave_shell(user=env.user):
         open_shell()
 
 
+@task
+def psql():
+    with settings(user=POSTGRESQL_USERNAME):
+        open_shell(POSTGRESQL_CMD_PSQL)
+
+
+@task
+def postgres():
+    with settings(user=POSTGRESQL_USERNAME):
+        open_shell('{} -D {}'.format(POSTGRESQL_CMD_SERVER,
+                                     POSTGRESQL_DATA_PATH))
+
+
+@task
+@hosts('192.168.59.201')
+def simple_master_psql():
+    vbox.running_up_and_wait(POSTGRESQL_HOSTS['ptr'][env.host])
+    psql()
+
+
 @hosts('192.168.59.201')
 @task
-def master_pgsql(user=env.user):
-    vbox.running_up_and_wait('pgsimplemaster')
-    with settings(user=user):
-        open_shell('/usr/local/pgsql/bin/psql')
-
-
+def simple_master_postgres():
+    vbox.running_up_and_wait(POSTGRESQL_HOSTS['ptr'][env.host])
+    postgres()
