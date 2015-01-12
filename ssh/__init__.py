@@ -7,6 +7,7 @@ from fabric import colors
 from fabric.api import task, run, cd
 from fabric.contrib.files import exists, contains, append
 
+
 @task
 def prepare_ssh_autologin(ssh_pub_key='~/.ssh/id_rsa.pub'):
     """Prepare server for ssh autologin with ssh ke."""
@@ -33,6 +34,5 @@ def prepare_ssh_autologin(ssh_pub_key='~/.ssh/id_rsa.pub'):
                                ' in %s.' % authorized_keys))
         else:
             print(colors.magenta('Public key already in %s.' % authorized_keys))
-        run('chmod 600 %s' % authorized_keys)
-    run('chmod 600 %s' % ssh_dir)
+    run('chmod 700 %s' % ssh_dir)
     return True
