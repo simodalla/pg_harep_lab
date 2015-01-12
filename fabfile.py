@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals, absolute_import
 
-import time
 import os.path
+import time
+import uuid
 
-from fabric.api import run, env, task, settings, hosts, open_shell, cd
-from fabric.contrib.files import exists, uncomment, append, sed
+from fabric.api import run, env, task, settings, hosts, open_shell, cd, local
+from fabric.contrib.files import exists, uncomment, append
+
+from contrib.files import sed
 
 import vbox
 
@@ -20,8 +23,10 @@ SNAPSHOTS = {
     'POSTGRES_SOURCE_INSTALL': 'postgres_source_installation'}
 
 POSTGRESQL_HOSTS = {
-    'ptr': {'192.168.59.201': 'pgsimplemaster',
-            '192.168.59.202': 'pgsimpleslave'},
+    'simple': {'192.168.59.201': 'pgsimplemaster',
+               '192.168.59.202': 'pgsimpleslave'},
+    'ptr': {'192.168.59.201': 'pgptrmaster',
+            '192.168.59.202': 'pgptrslave'},
 }
 POSTGRESQL_USERNAME = 'postgres'
 POSTGRESQL_ROOT_PATH = '/usr/local/pgsql'
@@ -31,6 +36,8 @@ POSTGRESQL_STORAGE_PATH = '/opt/postgresql_storage'
 POSTGRESQL_LOG_PATH = '/var/log/postgresql'
 POSTGRESQL_CMD_SERVER = os.path.join(POSTGRESQL_ROOT_PATH, 'bin', 'postgres')
 POSTGRESQL_CMD_PSQL = os.path.join(POSTGRESQL_ROOT_PATH, 'bin', 'psql')
+POSTGRESQL_CONFIG_FILE = os.path.join(POSTGRESQL_DATA_PATH, 'postgresql.conf')
+POSTGRESQL_PGHBA_FILE = os.path.join(POSTGRESQL_DATA_PATH, 'pg_hba.conf')
 
 
 def get_vm_ip(vm_name):
@@ -139,8 +146,8 @@ def deploy_vm_image():
 
 @hosts('192.168.59.200')
 @task
-def deploy_ptr_scenario(master_vm_name='pgsimplemaster',
-                        slave_vm_name='pgsimpleslave'):
+def deploy_simple_scenario(master_vm_name='pgsimplemaster',
+                           slave_vm_name='pgsimpleslave'):
     for vm_name in [master_vm_name, slave_vm_name]:
         if not vbox.vm_exist(vm_name):
             vbox.clone_vm(env.lab_vm_image_name, name=vm_name, options='link',
@@ -171,6 +178,45 @@ def deploy_ptr_scenario(master_vm_name='pgsimplemaster',
 
 @hosts('192.168.59.201')
 @task
+def deploy_ptr_master():
+    vm_name = POSTGRESQL_HOSTS['ptr'][env.host]
+    vm_parent = POSTGRESQL_HOSTS['simple'][env.host]
+    if not vbox.vm_exist(vm_name):
+        vbox.clone_vm(vm_parent, name=vm_name, options='link',
+                      snapshot='network_config_for_scenario')
+
+    if not vbox.has_snapshot(vm_name,
+                             'activation_archiving_transaction_log'):
+        success = vbox.running_up_and_wait(vm_name)
+        ptr_archive_path = os.path.join(POSTGRESQL_STORAGE_PATH, 'ptr_archive')
+        # sed('/etc/hostname', before=vm_parent, after=vm_name)
+        # sed('/etc/hosts', before=vm_parent, after=vm_name)
+        # run('mkdir {}'.format(ptr_archive_path))
+        # uncomment(POSTGRESQL_CONFIG_FILE, 'wal_level =')
+        # sed(POSTGRESQL_CONFIG_FILE,
+        #     "wal_level = minimal",
+        #     "wal_level = archive")
+        # uncomment(POSTGRESQL_CONFIG_FILE, 'archive_mode =')
+        # sed(POSTGRESQL_CONFIG_FILE,
+        #     "archive_mode = off",
+        #     "archive_mode = on")
+        # uncomment(POSTGRESQL_CONFIG_FILE, 'archive_command =')
+        sed(POSTGRESQL_CONFIG_FILE,
+            before="archive_command = ''",
+            after="archive_command = 'cp %p {}/%f'".format(
+                ptr_archive_path))
+                # ptr_archive_path.replace('/', '\/')))
+        # run('sed -i.bak -r -e "s/archive_command = \'\'/'
+        #     'archive_command = \'cp %p {}/%f\'/g" {}'.format(
+        #         ptr_archive_path, POSTGRESQL_CONFIG_FILE))
+        if success:
+            vbox.make_snaspshot(vm_name,
+                                'activation_archiving_transaction_log',
+                                'activation archiving transaction log')
+
+
+@hosts('192.168.59.201')
+@task
 def master_shell(user=env.user):
     vbox.running_up_and_wait('pgsimplemaster')
     with settings(user=user):
@@ -186,27 +232,87 @@ def slave_shell(user=env.user):
 
 
 @task
-def psql():
+def psql_shell():
     with settings(user=POSTGRESQL_USERNAME):
         open_shell(POSTGRESQL_CMD_PSQL)
 
 
+def psql_cmd(cmd, db=None, tuples_only=False, quiet=False):
+    with settings(user=POSTGRESQL_USERNAME):
+        if not cmd.endswith(';'):
+            cmd += ';'
+        return run("{}{}{} -c \"{}\"{}".format(
+            POSTGRESQL_CMD_PSQL,
+            ' -d %s' % db if db else '',
+            ' -t' if tuples_only else '',
+            cmd,
+            ';' if not cmd.endswith(';') else ''), quiet=quiet)
+
+
 @task
-def postgres():
+def run_postgres(datapath=None):
+    """Run postgres server"""
     with settings(user=POSTGRESQL_USERNAME):
         open_shell('{} -D {}'.format(POSTGRESQL_CMD_SERVER,
-                                     POSTGRESQL_DATA_PATH))
+                                     datapath or POSTGRESQL_DATA_PATH))
+
+@hosts('192.168.59.201')
+@task
+def simple_master_postgres():
+    """Run simple master vm and run postgres server"""
+    vbox.running_up_and_wait(POSTGRESQL_HOSTS['simple'][env.host])
+    run_postgres()
 
 
 @task
 @hosts('192.168.59.201')
 def simple_master_psql():
-    vbox.running_up_and_wait(POSTGRESQL_HOSTS['ptr'][env.host])
-    psql()
+    """Run simple master vm and open an psql shell"""
+    vbox.running_up_and_wait(POSTGRESQL_HOSTS['simple'][env.host])
+    psql_shell()
 
 
-@hosts('192.168.59.201')
 @task
-def simple_master_postgres():
-    vbox.running_up_and_wait(POSTGRESQL_HOSTS['ptr'][env.host])
-    postgres()
+def list_databases():
+    """List the database instances on server [pag 29]"""
+    psql_cmd("SELECT oid, datname FROM pg_database")
+
+
+@task
+def test_base_dir():
+    """Test the "base" dir of "data" dir [pag 29]"""
+    db_name = 'test_{}'.format(str(uuid.uuid4()).split('-')[0])
+    table_name = 't_test'
+    print("*** TEST DATABASE NAME: {}".format(db_name))
+    with settings(warn_only=True):
+        psql_cmd('CREATE DATABASE {}'.format(db_name))
+        run('ls -l {}'.format(os.path.join(POSTGRESQL_DATA_PATH, 'base')))
+        out_dbs = psql_cmd('SELECT oid, datname FROM pg_database')
+        psql_cmd("CREATE TABLE {} (id int4)".format(table_name), db=db_name)
+        out_table = psql_cmd("SELECT relfilenode, relname FROM pg_class"
+                             " WHERE relname = '{}'".format(table_name),
+                             db=db_name)
+        oid_db = [row.strip().split('|')[0].strip()
+                  for row in out_dbs.split('\n')
+                  if row.find(db_name) != -1][0]
+        oid_table = [row.strip().split('|')[0].strip()
+                     for row in out_table.split('\n')
+                     if row.find(table_name) != -1][0]
+
+        run('ls -l {}*'.format(
+            os.path.join(POSTGRESQL_DATA_PATH, 'base', oid_db, oid_table)))
+        psql_cmd('DROP DATABASE {}'.format(db_name))
+
+
+@task
+def cat_postgres_conf(data_path=None, pg_settings=None):
+    pg_settings = pg_settings or ['shared_buffers', 'synchronous_commit',
+                                  'wal_writer_delay', 'wal_writer_delayconfig',
+                                  'checkpoint_segments', 'checkpoint_timeout',
+                                  'checkpoint_completion_target',
+                                  'checkpoint_warning', 'archive_command',
+                                  'wal_level', 'archive_mode']
+    out = run("grep -E '{}' {}".format(
+        '|'.join(pg_settings),
+        os.path.join(POSTGRESQL_DATA_PATH, 'postgresql.conf')), quiet=True)
+    print("*************\n{}\n************".format(out))

@@ -66,7 +66,7 @@ def vm_exist(vm_name):
 
 
 def wait_for_up():
-    for attempt in range(0, 9):
+    for attempt in range(0, 15):
         try:
             # run('ls', quiet=True)
             api.run('ls -l')
@@ -79,7 +79,7 @@ def wait_for_up():
 
 
 def wait_for_down(vm_name):
-    for attempt in range(0, 9):
+    for attempt in range(0, 15):
         status = get_vm_status(vm_name)
         print("waiting for power off n: {}".format(attempt))
         if status == 'poweroff':
