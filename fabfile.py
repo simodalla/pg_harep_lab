@@ -5,11 +5,13 @@ import os.path
 import time
 import uuid
 
-from fabric.api import run, env, task, settings, hosts, open_shell, cd, local
+from fabric.api import run, env, task, settings, hosts, open_shell, cd, local, with_settings
 from fabric.contrib.files import exists, uncomment, append
 
-from contrib.files import sed
-
+from postgresql import psql_cmd
+from utils.decorators import tmp_db
+from utils.files import sed
+from utils.config import *
 import vbox
 
 
@@ -18,26 +20,6 @@ env.lab_vm_image_snapshot = 'post_installation'
 env.user = 'root'
 env.password = 'default'
 env.host = '192.168.59.200'
-
-SNAPSHOTS = {
-    'POSTGRES_SOURCE_INSTALL': 'postgres_source_installation'}
-
-POSTGRESQL_HOSTS = {
-    'simple': {'192.168.59.201': 'pgsimplemaster',
-               '192.168.59.202': 'pgsimpleslave'},
-    'ptr': {'192.168.59.201': 'pgptrmaster',
-            '192.168.59.202': 'pgptrslave'},
-}
-POSTGRESQL_USERNAME = 'postgres'
-POSTGRESQL_ROOT_PATH = '/usr/local/pgsql'
-POSTGRESQL_DATA_PATH = os.path.join(POSTGRESQL_ROOT_PATH, 'data')
-POSTGRESQL_HOME_PATH = '/home/postgresql'
-POSTGRESQL_STORAGE_PATH = '/opt/postgresql_storage'
-POSTGRESQL_LOG_PATH = '/var/log/postgresql'
-POSTGRESQL_CMD_SERVER = os.path.join(POSTGRESQL_ROOT_PATH, 'bin', 'postgres')
-POSTGRESQL_CMD_PSQL = os.path.join(POSTGRESQL_ROOT_PATH, 'bin', 'psql')
-POSTGRESQL_CONFIG_FILE = os.path.join(POSTGRESQL_DATA_PATH, 'postgresql.conf')
-POSTGRESQL_PGHBA_FILE = os.path.join(POSTGRESQL_DATA_PATH, 'pg_hba.conf')
 
 
 def get_vm_ip(vm_name):
@@ -189,26 +171,22 @@ def deploy_ptr_master():
                              'activation_archiving_transaction_log'):
         success = vbox.running_up_and_wait(vm_name)
         ptr_archive_path = os.path.join(POSTGRESQL_STORAGE_PATH, 'ptr_archive')
-        # sed('/etc/hostname', before=vm_parent, after=vm_name)
-        # sed('/etc/hosts', before=vm_parent, after=vm_name)
-        # run('mkdir {}'.format(ptr_archive_path))
-        # uncomment(POSTGRESQL_CONFIG_FILE, 'wal_level =')
-        # sed(POSTGRESQL_CONFIG_FILE,
-        #     "wal_level = minimal",
-        #     "wal_level = archive")
-        # uncomment(POSTGRESQL_CONFIG_FILE, 'archive_mode =')
-        # sed(POSTGRESQL_CONFIG_FILE,
-        #     "archive_mode = off",
-        #     "archive_mode = on")
-        # uncomment(POSTGRESQL_CONFIG_FILE, 'archive_command =')
+        sed('/etc/hostname', before=vm_parent, after=vm_name)
+        sed('/etc/hosts', before=vm_parent, after=vm_name)
+        run('mkdir {}'.format(ptr_archive_path))
+        uncomment(POSTGRESQL_CONFIG_FILE, 'wal_level =')
+        sed(POSTGRESQL_CONFIG_FILE,
+            "wal_level = minimal",
+            "wal_level = archive")
+        uncomment(POSTGRESQL_CONFIG_FILE, 'archive_mode =')
+        sed(POSTGRESQL_CONFIG_FILE,
+            "archive_mode = off",
+            "archive_mode = on")
+        uncomment(POSTGRESQL_CONFIG_FILE, 'archive_command =')
         sed(POSTGRESQL_CONFIG_FILE,
             before="archive_command = ''",
             after="archive_command = 'cp %p {}/%f'".format(
                 ptr_archive_path))
-                # ptr_archive_path.replace('/', '\/')))
-        # run('sed -i.bak -r -e "s/archive_command = \'\'/'
-        #     'archive_command = \'cp %p {}/%f\'/g" {}'.format(
-        #         ptr_archive_path, POSTGRESQL_CONFIG_FILE))
         if success:
             vbox.make_snaspshot(vm_name,
                                 'activation_archiving_transaction_log',
@@ -237,24 +215,13 @@ def psql_shell():
         open_shell(POSTGRESQL_CMD_PSQL)
 
 
-def psql_cmd(cmd, db=None, tuples_only=False, quiet=False):
-    with settings(user=POSTGRESQL_USERNAME):
-        if not cmd.endswith(';'):
-            cmd += ';'
-        return run("{}{}{} -c \"{}\"{}".format(
-            POSTGRESQL_CMD_PSQL,
-            ' -d %s' % db if db else '',
-            ' -t' if tuples_only else '',
-            cmd,
-            ';' if not cmd.endswith(';') else ''), quiet=quiet)
-
-
 @task
 def run_postgres(datapath=None):
     """Run postgres server"""
     with settings(user=POSTGRESQL_USERNAME):
         open_shell('{} -D {}'.format(POSTGRESQL_CMD_SERVER,
                                      datapath or POSTGRESQL_DATA_PATH))
+
 
 @hosts('192.168.59.201')
 @task
@@ -279,13 +246,13 @@ def list_databases():
 
 
 @task
+@tmp_db
 def test_base_dir():
     """Test the "base" dir of "data" dir [pag 29]"""
-    db_name = 'test_{}'.format(str(uuid.uuid4()).split('-')[0])
+    db_name = env.pg_tmp_db_name
     table_name = 't_test'
     print("*** TEST DATABASE NAME: {}".format(db_name))
     with settings(warn_only=True):
-        psql_cmd('CREATE DATABASE {}'.format(db_name))
         run('ls -l {}'.format(os.path.join(POSTGRESQL_DATA_PATH, 'base')))
         out_dbs = psql_cmd('SELECT oid, datname FROM pg_database')
         psql_cmd("CREATE TABLE {} (id int4)".format(table_name), db=db_name)
@@ -301,7 +268,6 @@ def test_base_dir():
 
         run('ls -l {}*'.format(
             os.path.join(POSTGRESQL_DATA_PATH, 'base', oid_db, oid_table)))
-        psql_cmd('DROP DATABASE {}'.format(db_name))
 
 
 @task
@@ -316,3 +282,13 @@ def cat_postgres_conf(data_path=None, pg_settings=None):
         '|'.join(pg_settings),
         os.path.join(POSTGRESQL_DATA_PATH, 'postgresql.conf')), quiet=True)
     print("*************\n{}\n************".format(out))
+
+
+@task
+@tmp_db
+def demo_dec(aaa=1):
+    # print("---", aaa)
+    # print(demo_dec._tmp)
+    print(env.pg_tmp_db_name)
+    local('echo "ciao"')
+
