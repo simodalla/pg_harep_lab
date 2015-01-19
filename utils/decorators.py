@@ -9,6 +9,7 @@ from fabric.api import local
 from fabric.decorators import _wrap_as_new
 
 from postgresql import psql_cmd
+from utils import get_random_string
 
 
 def test_dec(*arg_dec, **kwargs_dec):
@@ -46,9 +47,9 @@ def tmp_db(func):
         g = func.func_globals
         if 'env' in g.keys() and 'pg_tmp_db_name' in g['env'].keys():
             raise Exception('pg_tmp_db_name is already in env!!!')
-        g['env']['pg_tmp_db_name'] = 'test_{}'.format(
-            str(uuid.uuid4()).split('-')[0])
+        g['env']['pg_tmp_db_name'] = get_random_string('test')
         psql_cmd('CREATE DATABASE {}'.format(g['env']['pg_tmp_db_name']))
+        print("*** TEST DATABASE NAME: {}".format(g['env']['pg_tmp_db_name']))
         result = func(*args, **kwargs)
         psql_cmd('DROP DATABASE {}'.format(g['env']['pg_tmp_db_name']))
         del g['env']['pg_tmp_db_name']

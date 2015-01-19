@@ -61,14 +61,14 @@ def vm_exist(vm_name):
     with api.settings(api.hide('warnings'),
                       warn_only=True):
         return True if api.local('VBoxManage list vms |'
-                                 ' grep {}'.format(vm_name),
+                                 ' grep \'"{}"\''.format(vm_name),
                                  capture=True).strip() else False
 
 
+@api.with_settings(user='root')
 def wait_for_up():
     for attempt in range(0, 15):
         try:
-            # run('ls', quiet=True)
             api.run('ls -l')
             return True
         except NetworkError:
@@ -88,16 +88,19 @@ def wait_for_down(vm_name):
     return False
 
 
-def running_up_and_wait(vm_name):
+def running_up_and_wait(vm_name, wait=True):
     if get_vm_status(vm_name) == 'poweroff':
         vbox_manage('startvm', vm_name, type='headless')
-        return wait_for_up()
+        if wait:
+            return wait_for_up()
+        return True
     return False
 
 
 def power_off_and_wait(vm_name):
-    vbox_manage('controlvm', vm_name, 'acpipowerbutton')
-    wait_for_down(vm_name)
+    if vm_exist(vm_name) and get_vm_status(vm_name) == 'running':
+        vbox_manage('controlvm', vm_name, 'acpipowerbutton')
+        wait_for_down(vm_name)
 
 
 def make_snaspshot(vm_name, snapshot_name, snapshot_description):
@@ -105,6 +108,7 @@ def make_snaspshot(vm_name, snapshot_name, snapshot_description):
     vbox_manage('snapshot', vm_name, 'take',
                 snapshot_name,
                 description='"{}"'.format(snapshot_description))
+
 
 @api.task
 def vbox_manage(command, *args, **kwargs):
@@ -115,3 +119,15 @@ def vbox_manage(command, *args, **kwargs):
 def clone_vm(uuid_name, snapshot=None, options='link', register=True, **kwargs):
     vbox_manage('clonevm', uuid_name, snapshot=snapshot,
                 options=options, register=register, **kwargs)
+
+
+@api.task
+@api.with_settings(warn_only=True)
+def delete_vm(vm_name):
+    """Poweroff, unregister and delete virtual machine"""
+    if vm_exist(vm_name):
+        power_off_and_wait(vm_name)
+        vbox_manage('unregistervm', vm_name)
+        api.local('rm -rf ~/VirtualBox\ VMs/{}'.format(vm_name))
+    else:
+        print("The vm '{}' not exist!".format(vm_name))

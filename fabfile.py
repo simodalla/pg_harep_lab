@@ -1,23 +1,28 @@
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals, absolute_import
 
+import datetime
 import os.path
 import time
-import uuid
 
-from fabric.api import run, env, task, settings, hosts, open_shell, cd, local, with_settings
-from fabric.contrib.files import exists, uncomment, append
+from fabric.api import (run, env, task, settings, hosts, open_shell, cd, local,
+                        with_settings)
+from fabric import colors
+from fabric.contrib.files import exists, uncomment, append, contains
 
+import postgresql
 from postgresql import psql_cmd
 from utils.decorators import tmp_db
 from utils.files import sed
 from utils.config import *
 import vbox
+import ssh
+import scenario
+from utils import get_random_string
 
 
 env.lab_vm_image_name = 'ubuntu1404'
 env.lab_vm_image_snapshot = 'post_installation'
-env.user = 'root'
 env.password = 'default'
 env.host = '192.168.59.200'
 
@@ -27,28 +32,42 @@ def get_vm_ip(vm_name):
           vm_name, '/VirtualBox/GuestInfo/Net/1/V4/IP'))
 
 
+@hosts('192.168.59.201')
 @task
-def deploy_pg_server():
-    # vm_name = 'lab_pg_server'
-    # vbox.clone_vm(env.lab_vm_image_name, name=vm_name,
-    #               snapshot=env.lab_vm_image_snapshot)
-    vbox.vbox_manage('startvm', env.lab_vm_image_name)
-    up = False
-    while not up:
-        with settings(warn_only=True):
-            get_vm_ip(env.lab_vm_image_name)
-            run('ll')
-            time.sleep(1)
-            up = True
-    vbox.vbox_manage('controlvm', env.lab_vm_image_name, 'acpipowerbutton')
+def master_shell(user=env.user):
+    vbox.running_up_and_wait('pgsimplemaster')
+    with settings(user=user):
+        open_shell()
 
 
-@task()
-def demo():
-    # print(vbox.has_snapshot(env.lab_vm_image_name, 'post_installation'))
-    # vbox.has_snapshot('pgsimplemaster', 'pippo')
-    print(vbox.vm_exist('vm_exist'))
-    print(vbox.vm_exist('pgsimplemaster'))
+@hosts('192.168.59.202')
+@task
+def slave_shell(user=env.user):
+    vbox.running_up_and_wait('pgsimpleslave')
+    with settings(user=user):
+        open_shell()
+
+
+@task
+def psql_shell():
+    with settings(user=POSTGRESQL_USERNAME):
+        open_shell(POSTGRESQL_CMD_PSQL)
+
+
+@hosts('192.168.59.201')
+@task
+def run_master_postgres(scenario='simple'):
+    """Run simple master vm and run postgres server"""
+    vbox.running_up_and_wait(POSTGRESQL_HOSTS[scenario][env.host]['vm_name'])
+    postgresql.run_interactive()
+
+
+@task
+@hosts('192.168.59.201')
+def simple_master_psql():
+    """Run simple master vm and open an psql shell"""
+    vbox.running_up_and_wait(POSTGRESQL_HOSTS['simple'][env.host]['vm_name'])
+    psql_shell()
 
 
 @hosts('192.168.59.200')
@@ -85,6 +104,7 @@ def deploy_vm_image():
             ' {}'.format(POSTGRESQL_USERNAME))
         run('echo "{}:{}" | chpasswd'.format(POSTGRESQL_USERNAME,
                                              env.password))
+        postgresql.add_bin_path()
         for path in [POSTGRESQL_DATA_PATH, POSTGRESQL_LOG_PATH,
                      POSTGRESQL_STORAGE_PATH]:
             if not exists(path):
@@ -158,11 +178,40 @@ def deploy_simple_scenario(master_vm_name='pgsimplemaster',
                                     'network configuration for scenario')
 
 
-@hosts('192.168.59.201')
+@hosts(VM_TEMPLATE_IP)
+@with_settings(user='root')
 @task
-def deploy_ptr_master():
-    vm_name = POSTGRESQL_HOSTS['ptr'][env.host]
-    vm_parent = POSTGRESQL_HOSTS['simple'][env.host]
+def prepare_scenario(scenario):
+    for ip in POSTGRESQL_HOSTS[scenario]:
+        vm_name = POSTGRESQL_HOSTS[scenario][ip]['vm_name']
+        if not vbox.vm_exist(vm_name):
+            vbox.clone_vm(env.lab_vm_image_name, name=vm_name, options='link',
+                          snapshot='postgres_server_post_config')
+        if not vbox.has_snapshot(vm_name, 'network_config_for_scenario'):
+            success = vbox.running_up_and_wait(vm_name)
+            ssh.prepare_ssh_autologin()
+            sed('/etc/hostname', before='ubuntu1', after=vm_name)
+            sed('/etc/hosts', before='ubuntu1', after=vm_name)
+            for other_ip in [oi for oi in POSTGRESQL_HOSTS[scenario]
+                             if oi != ip]:
+                append('/etc/hosts', '{ip}  {hostname}'.format(
+                    ip=other_ip,
+                    hostname=POSTGRESQL_HOSTS[scenario][other_ip]))
+            sed('/etc/network/interfaces',
+                before="address {}".format(VM_TEMPLATE_IP),
+                after="address {}".format(ip))
+            if success:
+                vbox.make_snaspshot(vm_name,
+                                    'network_config_for_scenario',
+                                    'network configuration for scenario')
+
+
+
+@hosts('192.168.59.201', '192.168.59.202')
+@task
+def deploy_ptr_scenario():
+    vm_name = POSTGRESQL_HOSTS['ptr'][env.host]['vm_name']
+    vm_parent = POSTGRESQL_HOSTS['simple'][env.host]['vm_name']
     if not vbox.vm_exist(vm_name):
         vbox.clone_vm(vm_parent, name=vm_name, options='link',
                       snapshot='network_config_for_scenario')
@@ -170,73 +219,40 @@ def deploy_ptr_master():
     if not vbox.has_snapshot(vm_name,
                              'activation_archiving_transaction_log'):
         success = vbox.running_up_and_wait(vm_name)
-        ptr_archive_path = os.path.join(POSTGRESQL_STORAGE_PATH, 'ptr_archive')
-        sed('/etc/hostname', before=vm_parent, after=vm_name)
-        sed('/etc/hosts', before=vm_parent, after=vm_name)
-        run('mkdir {}'.format(ptr_archive_path))
-        uncomment(POSTGRESQL_CONFIG_FILE, 'wal_level =')
-        sed(POSTGRESQL_CONFIG_FILE,
-            "wal_level = minimal",
-            "wal_level = archive")
-        uncomment(POSTGRESQL_CONFIG_FILE, 'archive_mode =')
-        sed(POSTGRESQL_CONFIG_FILE,
-            "archive_mode = off",
-            "archive_mode = on")
-        uncomment(POSTGRESQL_CONFIG_FILE, 'archive_command =')
-        sed(POSTGRESQL_CONFIG_FILE,
-            before="archive_command = ''",
-            after="archive_command = 'cp %p {}/%f'".format(
-                ptr_archive_path))
+        with settings(user='root'):
+            ssh.prepare_ssh_autologin()
+            sed('/etc/hostname', before=vm_parent, after=vm_name)
+            sed('/etc/hosts', before=vm_parent, after=vm_name)
+        with settings(user=POSTGRESQL_USERNAME):
+            postgresql.add_bin_path()
+            ssh.prepare_ssh_autologin()
+            if env.host.endswith('201'):
+                run('mkdir {}'.format(
+                    POSTGRESQL_HOSTS['ptr'][env.host]['archive_path']))
+                uncomment(POSTGRESQL_CONFIG_FILE, 'wal_level =')
+                sed(POSTGRESQL_CONFIG_FILE,
+                    "wal_level = minimal",
+                    "wal_level = archive")
+                uncomment(POSTGRESQL_CONFIG_FILE, 'archive_mode =')
+                sed(POSTGRESQL_CONFIG_FILE,
+                    "archive_mode = off",
+                    "archive_mode = on")
+                uncomment(POSTGRESQL_CONFIG_FILE, 'archive_command =')
+                sed(POSTGRESQL_CONFIG_FILE,
+                    before="archive_command = ''",
+                    after="archive_command = 'cp %p {}/%f'".format(
+                        POSTGRESQL_HOSTS['ptr'][env.host]['archive_path']))
+                uncomment(POSTGRESQL_CONFIG_FILE, 'max_wal_senders =')
+                sed(POSTGRESQL_CONFIG_FILE,
+                    "max_wal_senders = 0",
+                    "max_wal_senders = 15")
+            elif env.host.endswith('202'):
+                run('mkdir {}'.format(
+                    POSTGRESQL_HOSTS['ptr'][env.host]['base_backup_path']))
         if success:
             vbox.make_snaspshot(vm_name,
                                 'activation_archiving_transaction_log',
                                 'activation archiving transaction log')
-
-
-@hosts('192.168.59.201')
-@task
-def master_shell(user=env.user):
-    vbox.running_up_and_wait('pgsimplemaster')
-    with settings(user=user):
-        open_shell()
-
-
-@hosts('192.168.59.202')
-@task
-def slave_shell(user=env.user):
-    vbox.running_up_and_wait('pgsimpleslave')
-    with settings(user=user):
-        open_shell()
-
-
-@task
-def psql_shell():
-    with settings(user=POSTGRESQL_USERNAME):
-        open_shell(POSTGRESQL_CMD_PSQL)
-
-
-@task
-def run_postgres(datapath=None):
-    """Run postgres server"""
-    with settings(user=POSTGRESQL_USERNAME):
-        open_shell('{} -D {}'.format(POSTGRESQL_CMD_SERVER,
-                                     datapath or POSTGRESQL_DATA_PATH))
-
-
-@hosts('192.168.59.201')
-@task
-def simple_master_postgres():
-    """Run simple master vm and run postgres server"""
-    vbox.running_up_and_wait(POSTGRESQL_HOSTS['simple'][env.host])
-    run_postgres()
-
-
-@task
-@hosts('192.168.59.201')
-def simple_master_psql():
-    """Run simple master vm and open an psql shell"""
-    vbox.running_up_and_wait(POSTGRESQL_HOSTS['simple'][env.host])
-    psql_shell()
 
 
 @task
@@ -247,18 +263,84 @@ def list_databases():
 
 @task
 @tmp_db
+def ptr_test_archive_xlog(table_name='t_test'):
+    with settings(warn_only=True, user='postgres'):
+        run("ls -l {}".format(
+            POSTGRESQL_HOSTS['ptr'][env.host]['archive_path']))
+        psql_cmd("CREATE TABLE %s AS SELECT * FROM "
+                 "generate_series(1, 1000000);" % table_name,
+                 db=env.pg_tmp_db_name)
+        psql_cmd("SELECT * FROM %s LIMIT 3;" % table_name,
+                 db=env.pg_tmp_db_name)
+        run("ls -l {}".format(
+            POSTGRESQL_HOSTS['ptr'][env.host]['archive_path']))
+
+
+@hosts('192.168.59.202')
+@with_settings(user='postgres')
+@task
+def ptr_slave_make_base_backup(checkpoint='fast', xlog_method=None,
+                               base_backup_path=None):
+    base_backup_path = base_backup_path or '{}_{}'.format(
+        POSTGRESQL_HOSTS['ptr'][env.host]['base_backup_path'],
+        get_random_string())
+    run('mkdir {}'.format(base_backup_path))
+    print(colors.green(
+        '\nPath of base backup: "{}"\n'.format(base_backup_path)))
+    pg_basebackup_cmd = os.path.join(
+        POSTGRESQL_ROOT_PATH, 'bin', 'pg_basebackup')
+    run('{cmd} -h {master} -D {data} {checkpoint} {xlog_method}'.format(
+        cmd=pg_basebackup_cmd,
+        master=VM_MASTER_IP,
+        data=base_backup_path,
+        checkpoint="--checkpoint={}".format(
+            checkpoint) if checkpoint else '',
+        xlog_method="--xlog-method={}".format(
+            xlog_method) if xlog_method else '').strip())
+    run("ls -l {}".format(base_backup_path))
+
+
+@hosts('192.168.59.202')
+@with_settings(user='postgres')
+@task
+def ptr_perform_basic_recovery():
+    base_backup_path = '{}_{}'.format(
+        POSTGRESQL_HOSTS['ptr'][env.host]['base_backup_path'],
+        get_random_string())
+    ptr_slave_make_base_backup(base_backup_path=base_backup_path)
+    archive_path = POSTGRESQL_HOSTS['ptr'][VM_MASTER_IP]['archive_path']
+    recovery_file = 'recovery.conf'
+    with cd(base_backup_path):
+        run('touch {}'.format(recovery_file))
+        append(recovery_file,
+               "restore_command = 'rsync -azh {}@{}:{}/%f %p'".format(
+                   POSTGRESQL_USERNAME,
+                   VM_MASTER_IP,
+                   archive_path))
+        append(recovery_file, "recovery_target_time = '{}'".format(
+            datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    run('chmod 700 {}'.format(base_backup_path))
+    if exists(archive_path):
+        run('rm -rf {}/*'.format(archive_path))
+    else:
+        run('mkdir {}'.format(archive_path))
+    open_shell('pg_ctl -D %s/ start' % base_backup_path)
+
+
+@task
+@tmp_db
 def test_base_dir():
     """Test the "base" dir of "data" dir [pag 29]"""
     db_name = env.pg_tmp_db_name
     table_name = 't_test'
-    print("*** TEST DATABASE NAME: {}".format(db_name))
     with settings(warn_only=True):
         run('ls -l {}'.format(os.path.join(POSTGRESQL_DATA_PATH, 'base')))
         out_dbs = psql_cmd('SELECT oid, datname FROM pg_database')
-        psql_cmd("CREATE TABLE {} (id int4)".format(table_name), db=db_name)
-        out_table = psql_cmd("SELECT relfilenode, relname FROM pg_class"
-                             " WHERE relname = '{}'".format(table_name),
-                             db=db_name)
+        psql_cmd("CREATE TABLE %s (id int4)" % table_name, db=db_name)
+        out_table = psql_cmd(
+            "SELECT relfilenode, relname FROM pg_class"
+            " WHERE relname = '{}'".format(table_name),
+            db=db_name)
         oid_db = [row.strip().split('|')[0].strip()
                   for row in out_dbs.split('\n')
                   if row.find(db_name) != -1][0]
@@ -271,24 +353,7 @@ def test_base_dir():
 
 
 @task
-def cat_postgres_conf(data_path=None, pg_settings=None):
-    pg_settings = pg_settings or ['shared_buffers', 'synchronous_commit',
-                                  'wal_writer_delay', 'wal_writer_delayconfig',
-                                  'checkpoint_segments', 'checkpoint_timeout',
-                                  'checkpoint_completion_target',
-                                  'checkpoint_warning', 'archive_command',
-                                  'wal_level', 'archive_mode']
-    out = run("grep -E '{}' {}".format(
-        '|'.join(pg_settings),
-        os.path.join(POSTGRESQL_DATA_PATH, 'postgresql.conf')), quiet=True)
-    print("*************\n{}\n************".format(out))
-
-
-@task
-@tmp_db
-def demo_dec(aaa=1):
-    # print("---", aaa)
-    # print(demo_dec._tmp)
-    print(env.pg_tmp_db_name)
-    local('echo "ciao"')
-
+def demo_random():
+    from utils import get_random_string
+    print(get_random_string())
+    print(get_random_string('test'))

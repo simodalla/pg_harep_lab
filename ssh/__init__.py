@@ -17,7 +17,7 @@ def prepare_ssh_autologin(ssh_pub_key='~/.ssh/id_rsa.pub'):
     if not exists(ssh_dir):
         run('mkdir %s' % ssh_dir)
 
-    with cd('~/.ssh'):
+    with cd(ssh_dir):
         if not exists(authorized_keys):
             run('touch %s && chmod 600 %s' % (authorized_keys,
                                               authorized_keys))
@@ -33,6 +33,7 @@ def prepare_ssh_autologin(ssh_pub_key='~/.ssh/id_rsa.pub'):
             print(colors.green('Public key successfully added'
                                ' in %s.' % authorized_keys))
         else:
-            print(colors.magenta('Public key already in %s.' % authorized_keys))
+            print(colors.magenta('Public key already in %s.' %
+                                 authorized_keys))
     run('chmod 700 %s' % ssh_dir)
     return True
