@@ -19,8 +19,9 @@ def psql_cmd(cmd, db=None, tuples_only=False, quiet=False):
             ';' if not cmd.endswith(';') else ''), quiet=quiet)
 
 
+@with_settings(user=POSTGRESQL_USERNAME)
 @task
-def print_postgres_conf(data_path=None, pg_settings=None):
+def print_conf(data_path=None, pg_settings=None):
     """Print important settings of postgresql.conf file"""
     pg_settings = pg_settings or sorted(
         ['shared_buffers', 'synchronous_commit',

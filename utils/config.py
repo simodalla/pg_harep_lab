@@ -42,6 +42,8 @@ POSTGRESQL_HOSTS = {
     'async': {
         VM_MASTER_IP: {
             'vm_name': 'pgasynmaster',
+            'archive_path': os.path.join(POSTGRESQL_STORAGE_PATH,
+                                         'async_archive'),
         },
         VM_SLAVE_IP: {
             'vm_name': 'pgasynslave',

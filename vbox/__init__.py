@@ -94,7 +94,7 @@ def running_up_and_wait(vm_name, wait=True):
         if wait:
             return wait_for_up()
         return True
-    return False
+    return True
 
 
 def power_off_and_wait(vm_name):

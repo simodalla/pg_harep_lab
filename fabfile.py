@@ -32,7 +32,7 @@ def get_vm_ip(vm_name):
           vm_name, '/VirtualBox/GuestInfo/Net/1/V4/IP'))
 
 
-@hosts('192.168.59.201')
+@hosts(VM_MASTER_IP)
 @task
 def master_shell(user=env.user):
     vbox.running_up_and_wait('pgsimplemaster')
@@ -40,7 +40,7 @@ def master_shell(user=env.user):
         open_shell()
 
 
-@hosts('192.168.59.202')
+@hosts(VM_SLAVE_IP)
 @task
 def slave_shell(user=env.user):
     vbox.running_up_and_wait('pgsimpleslave')
@@ -54,9 +54,9 @@ def psql_shell():
         open_shell(POSTGRESQL_CMD_PSQL)
 
 
-@hosts('192.168.59.201')
+@hosts(VM_MASTER_IP)
 @task
-def run_master_postgres(scenario='simple'):
+def run_master_postgres(scenario):
     """Run simple master vm and run postgres server"""
     vbox.running_up_and_wait(POSTGRESQL_HOSTS[scenario][env.host]['vm_name'])
     postgresql.run_interactive()
@@ -196,7 +196,7 @@ def prepare_scenario(scenario):
                              if oi != ip]:
                 append('/etc/hosts', '{ip}  {hostname}'.format(
                     ip=other_ip,
-                    hostname=POSTGRESQL_HOSTS[scenario][other_ip]))
+                    hostname=POSTGRESQL_HOSTS[scenario][other_ip]['vm_name']))
             sed('/etc/network/interfaces',
                 before="address {}".format(VM_TEMPLATE_IP),
                 after="address {}".format(ip))
@@ -255,6 +255,105 @@ def deploy_ptr_scenario():
                                 'activation archiving transaction log')
 
 
+@hosts(VM_MASTER_IP)
+@with_settings(user=POSTGRESQL_USERNAME)
+@task
+def deploy_async_simple_master(archive=False):
+    current_scenario = 'async'
+    vm_name = POSTGRESQL_HOSTS[current_scenario][env.host]['vm_name']
+    postgresql.add_bin_path()
+    if not vbox.has_snapshot(vm_name,
+                             'set_aysnc_replication'):
+        vbox.running_up_and_wait(vm_name)
+        if env.host == VM_MASTER_IP:  # master
+            uncomment(POSTGRESQL_CONFIG_FILE, 'wal_level =')
+            sed(POSTGRESQL_CONFIG_FILE,
+                "wal_level = minimal",
+                "wal_level = hot_standby")
+            uncomment(POSTGRESQL_CONFIG_FILE, 'max_wal_senders =')
+            sed(POSTGRESQL_CONFIG_FILE,
+                "max_wal_senders = 0",
+                "max_wal_senders = 15")
+        vbox.make_snaspshot(vm_name,
+                            'set_aysnc_replication',
+                            'set aysnc replication')
+    if archive:
+        if not vbox.has_snapshot(vm_name,
+                                 'set_archive_mode'):
+            archive_path = POSTGRESQL_HOSTS[current_scenario][env.host][
+                'archive_path']
+            run('mkdir {}'.format(archive_path))
+            uncomment(POSTGRESQL_CONFIG_FILE, 'archive_mode =')
+            sed(POSTGRESQL_CONFIG_FILE,
+                "archive_mode = off",
+                "archive_mode = on")
+            uncomment(POSTGRESQL_CONFIG_FILE, 'archive_command =')
+            sed(POSTGRESQL_CONFIG_FILE,
+                before="archive_command = ''",
+                after="archive_command = 'cp %p {}/%f'".format(archive_path))
+            vbox.make_snaspshot(vm_name,
+                                'set_archive_mode',
+                                'set archive mode')
+
+    # run_master_postgres('async')
+
+
+@hosts(VM_SLAVE_IP)
+@with_settings(user=POSTGRESQL_USERNAME)
+@task
+def deploy_async_simple_slave(target_path=None, master=None,
+                              trigger_file=False, archive=False):
+    vm_name = POSTGRESQL_HOSTS['async'][env.host]['vm_name']
+    master = master or VM_MASTER_IP
+    vbox.running_up_and_wait(vm_name)
+    target_path = (
+        os.path.join(POSTGRESQL_STORAGE_PATH, target_path) if target_path else
+        '{}_{}'.format(os.path.join(POSTGRESQL_STORAGE_PATH, 'asyn'),
+                       get_random_string()))
+    postgresql.add_bin_path()
+    print(colors.green('\nPath of target dir: "{}"\n'.format(target_path)))
+    if not exists(target_path):
+        run('mkdir {path} && chmod 700 {path}'.format(path=target_path))
+        pg_basebackup_cmd = os.path.join(
+            POSTGRESQL_ROOT_PATH, 'bin', 'pg_basebackup')
+        run('{cmd} -h {master} -D {data} --xlog-method=stream'.format(
+            cmd=pg_basebackup_cmd,
+            master=master,
+            data=target_path))
+        with cd(target_path):
+            recovery_file = 'recovery.conf'
+            if not exists(recovery_file):
+                run('touch {}'.format(recovery_file))
+            else:
+                run('rm -f {}'.format(recovery_file))
+            if archive:
+                archive_path = POSTGRESQL_HOSTS['async'][VM_MASTER_IP][
+                    'archive_path']
+                if exists(archive_path):
+                    run('rm -rf {}/*'.format(archive_path))
+                else:
+                    run('mkdir {}'.format(archive_path))
+                append(recovery_file,
+                       "restore_command = 'rsync -azh {}@{}:{}/%f %p'".format(
+                           POSTGRESQL_USERNAME,
+                           VM_MASTER_IP,
+                           archive_path))
+            append(recovery_file, 'standby_mode = on')
+            append(recovery_file,
+                   "primary_conninfo= ' host={} port=5432 '".format(
+                       master))
+            # making slave readable (pag. 82)
+            uncomment('postgresql.conf', 'hot_standby =')
+            sed('postgresql.conf', 'hot_standby = off', 'hot_standby = on')
+            if trigger_file:
+                if not contains(recovery_file, 'trigger_file'):
+                    append(recovery_file,
+                           "trigger_file = '/tmp/start_me_up.txt'")
+
+    postgresql.run_interactive(datapath=target_path)
+
+
+
 @task
 def list_databases():
     """List the database instances on server [pag 29]"""
@@ -276,8 +375,8 @@ def ptr_test_archive_xlog(table_name='t_test'):
             POSTGRESQL_HOSTS['ptr'][env.host]['archive_path']))
 
 
-@hosts('192.168.59.202')
-@with_settings(user='postgres')
+@hosts(VM_SLAVE_IP)
+@with_settings(user=POSTGRESQL_USERNAME)
 @task
 def ptr_slave_make_base_backup(checkpoint='fast', xlog_method=None,
                                base_backup_path=None):
@@ -300,7 +399,7 @@ def ptr_slave_make_base_backup(checkpoint='fast', xlog_method=None,
     run("ls -l {}".format(base_backup_path))
 
 
-@hosts('192.168.59.202')
+@hosts(VM_SLAVE_IP)
 @with_settings(user='postgres')
 @task
 def ptr_perform_basic_recovery():
@@ -333,6 +432,7 @@ def test_base_dir():
     """Test the "base" dir of "data" dir [pag 29]"""
     db_name = env.pg_tmp_db_name
     table_name = 't_test'
+    print(colors.green('DB_NAME: {}'.format(db_name)))
     with settings(warn_only=True):
         run('ls -l {}'.format(os.path.join(POSTGRESQL_DATA_PATH, 'base')))
         out_dbs = psql_cmd('SELECT oid, datname FROM pg_database')
@@ -350,6 +450,22 @@ def test_base_dir():
 
         run('ls -l {}*'.format(
             os.path.join(POSTGRESQL_DATA_PATH, 'base', oid_db, oid_table)))
+
+
+@task
+@tmp_db
+def test_async_cluster():
+    """Test the "base" dir of "data" dir [pag 29]"""
+    db_name = env.pg_tmp_db_name
+    table_name = 't_test'
+    print(colors.green('DB_NAME: {}'.format(db_name)))
+    with settings(warn_only=True, user=POSTGRESQL_USERNAME):
+        run('ls -l {}'.format(os.path.join(POSTGRESQL_DATA_PATH, 'base')))
+        out_dbs = psql_cmd('SELECT oid, datname FROM pg_database')
+        psql_cmd("CREATE TABLE %s (id int4)" % table_name, db=db_name)
+        psql_shell()
+
+
 
 
 @task
