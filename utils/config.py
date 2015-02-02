@@ -51,5 +51,16 @@ POSTGRESQL_HOSTS = {
         VM_SLAVE_2_IP: {
             'vm_name': 'pgasynslave2',
         }
+    },
+    'sync': {
+        VM_MASTER_IP: {
+            'vm_name': 'pgsyncmaster',
+            'archive_path': os.path.join(POSTGRESQL_STORAGE_PATH,
+                                         'sync_archive'),
+            'application_name': 'sync_scenario',
+        },
+        VM_SLAVE_IP: {
+            'vm_name': 'pgsyncslave',
+        },
     }
 }

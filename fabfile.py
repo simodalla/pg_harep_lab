@@ -6,7 +6,7 @@ import os.path
 import time
 
 from fabric.api import (run, env, task, settings, hosts, open_shell, cd, local,
-                        with_settings)
+                        with_settings, abort)
 from fabric import colors
 from fabric.contrib.files import exists, uncomment, append, contains
 
@@ -190,6 +190,9 @@ def prepare_scenario(scenario):
         if not vbox.has_snapshot(vm_name, 'network_config_for_scenario'):
             success = vbox.running_up_and_wait(vm_name)
             ssh.prepare_ssh_autologin()
+            with settings(user=POSTGRESQL_USERNAME):
+                ssh.prepare_ssh_autologin()
+                postgresql.add_bin_path()
             sed('/etc/hostname', before='ubuntu1', after=vm_name)
             sed('/etc/hosts', before='ubuntu1', after=vm_name)
             for other_ip in [oi for oi in POSTGRESQL_HOSTS[scenario]
@@ -204,7 +207,6 @@ def prepare_scenario(scenario):
                 vbox.make_snaspshot(vm_name,
                                     'network_config_for_scenario',
                                     'network configuration for scenario')
-
 
 
 @hosts('192.168.59.201', '192.168.59.202')
@@ -353,7 +355,6 @@ def deploy_async_simple_slave(target_path=None, master=None,
     postgresql.run_interactive(datapath=target_path)
 
 
-
 @task
 def list_databases():
     """List the database instances on server [pag 29]"""
@@ -466,7 +467,161 @@ def test_async_cluster():
         psql_shell()
 
 
+#### synchronous replication scenario ######################################
 
+@hosts(VM_MASTER_IP)
+@with_settings(user=POSTGRESQL_USERNAME)
+@task
+def deploy_sync_master(archive=False):
+    current_scenario = 'sync'
+    vm_name = POSTGRESQL_HOSTS[current_scenario][env.host]['vm_name']
+    application_name = POSTGRESQL_HOSTS[current_scenario][env.host][
+        'application_name']
+    if not vbox.has_snapshot(vm_name,
+                             'set_sync_replication'):
+        vbox.running_up_and_wait(vm_name)
+        postgresql.add_bin_path()
+        uncomment(POSTGRESQL_CONFIG_FILE, 'wal_level =')
+        sed(POSTGRESQL_CONFIG_FILE,
+            "wal_level = minimal",
+            "wal_level = hot_standby")
+        uncomment(POSTGRESQL_CONFIG_FILE, 'max_wal_senders =')
+        sed(POSTGRESQL_CONFIG_FILE,
+            "max_wal_senders = 0",
+            "max_wal_senders = 15")
+        uncomment(POSTGRESQL_CONFIG_FILE, 'hot_standby =')
+        sed(POSTGRESQL_CONFIG_FILE,
+            'hot_standby = off',
+            'hot_standby = on')
+        uncomment(POSTGRESQL_CONFIG_FILE, 'synchronous_standby_names =')
+        sed(POSTGRESQL_CONFIG_FILE,
+            "synchronous_standby_names = ''",
+            "synchronous_standby_names = '{}'".format(application_name))
+        uncomment(POSTGRESQL_CONFIG_FILE, 'wal_keep_segments =')
+        sed(POSTGRESQL_CONFIG_FILE,
+            'wal_keep_segments = 0',
+            'wal_keep_segments = 500')
+        vbox.make_snaspshot(vm_name,
+                            'set_aysnc_replication',
+                            'set aysnc replication')
+        vbox.running_up_and_wait(vm_name)
+    run_master_postgres(current_scenario)
+
+@hosts(VM_SLAVE_IP)
+@with_settings(user=POSTGRESQL_USERNAME)
+@task
+def deploy_sync_slave(target_path=None, master=None,
+                      trigger_file=False, archive=False):
+    current_scenario = 'sync'
+    vm_name = POSTGRESQL_HOSTS[current_scenario][env.host]['vm_name']
+    application_name = POSTGRESQL_HOSTS[current_scenario][VM_MASTER_IP][
+        'application_name']
+    master = master or VM_MASTER_IP
+    vbox.running_up_and_wait(vm_name)
+    target_path = (
+        os.path.join(POSTGRESQL_STORAGE_PATH, target_path) if target_path else
+        '{}_{}'.format(os.path.join(POSTGRESQL_STORAGE_PATH, current_scenario),
+                       get_random_string()))
+    postgresql.add_bin_path()
+    print(colors.green('\nPath of target dir: "{}"\n'.format(target_path)))
+    if not exists(target_path):
+        run('mkdir {path} && chmod 700 {path}'.format(path=target_path))
+        pg_basebackup_cmd = os.path.join(
+            POSTGRESQL_ROOT_PATH, 'bin', 'pg_basebackup')
+        run('{cmd} -h {master} -D {data} --xlog-method=stream'.format(
+            cmd=pg_basebackup_cmd,
+            master=master,
+            data=target_path))
+        with cd(target_path):
+            recovery_file = 'recovery.conf'
+            if not exists(recovery_file):
+                run('touch {}'.format(recovery_file))
+            else:
+                run('rm -f {}'.format(recovery_file))
+            if archive:
+                archive_path = POSTGRESQL_HOSTS[current_scenario][
+                    VM_MASTER_IP]['archive_path']
+                if exists(archive_path):
+                    run('rm -rf {}/*'.format(archive_path))
+                else:
+                    run('mkdir {}'.format(archive_path))
+                append(recovery_file,
+                       "restore_command = 'rsync -azh {}@{}:{}/%f %p'".format(
+                           POSTGRESQL_USERNAME,
+                           VM_MASTER_IP,
+                           archive_path))
+            append(recovery_file, 'standby_mode = on')
+            append(recovery_file,
+                   "primary_conninfo= ' host={} application_name={}"
+                   " port=5432 '".format(master, application_name))
+            if trigger_file:
+                if not contains(recovery_file, 'trigger_file'):
+                    append(recovery_file,
+                           "trigger_file = '/tmp/start_me_up.txt'")
+
+    postgresql.run_interactive(datapath=target_path)
+
+
+@hosts(VM_MASTER_IP)
+@with_settings(user=POSTGRESQL_USERNAME)
+@task
+def check_sync_replication():
+    local(r"""psql -h {} -U {} <<EOF
+\x
+SELECT * FROM pg_stat_replication;
+EOF""".format(VM_MASTER_IP, POSTGRESQL_USERNAME))
+
+
+@task
+@tmp_db
+def test_sync_cluster(table_name=None):
+    """Test the "base" dir of "data" dir [pag 29]"""
+    db_name = env.pg_tmp_db_name
+    table_name = table_name or 't_test'
+    print(colors.green('DB_NAME: {}'.format(db_name)))
+    with settings(warn_only=True, user=POSTGRESQL_USERNAME):
+        run('ls -l {}'.format(os.path.join(POSTGRESQL_DATA_PATH, 'base')))
+        psql_cmd("CREATE TABLE %s (id serial, name VARCHAR(20))" % table_name,
+                 db=db_name)
+        psql_shell()
+
+
+@task
+def watch_query(db=None, table=None):
+    table = table or 't_test'
+    if not db:
+        abort('Specify database name!')
+    local('watch -n 1 "psql -h {} -U {} -d {} -c \'select * from {}\'"'.format(
+        env.host, POSTGRESQL_USERNAME, db, table))
+
+
+@task
+def insert_to_test(db=None, value=None, table=None, ):
+    table = table or 't_test'
+    value = value or 'random()'
+    if not db:
+        abort('Specify database name!')
+    psql_cmd("INSERT INTO {} (name) VALUES ('{}')".format(table, value),
+             db=db)
+
+@hosts(VM_MASTER_IP)
+@with_settings(user=POSTGRESQL_USERNAME)
+@task
+def change_durability_onthefly(db=None, synchronous_commit='local'):
+    """change durability onthefly (pag. 103"""
+    if not db:
+        abort('Specify database name!')
+    local(r"""psql -h {} -U {} -d {}<<EOF
+BEGIN;
+INSERT INTO t_test (name) VALUES ('name_1');
+INSERT INTO t_test (name) VALUES ('name_2');
+SET synchronous_commit TO {};
+\x
+SELECT * FROM pg_stat_replication;
+COMMIT;
+EOF""".format(VM_MASTER_IP, POSTGRESQL_USERNAME, db, synchronous_commit))
+
+#### end synchronous replication scenario ###################################
 
 @task
 def demo_random():

@@ -8,14 +8,15 @@ from utils.config import *
 
 
 @task
-def poweroff(scenario):
+def power_off(scenario):
     """Poweroff all virtual machines of scenario"""
     for conf in POSTGRESQL_HOSTS[scenario]:
         vbox.power_off_and_wait(POSTGRESQL_HOSTS[scenario][conf]['vm_name'])
 
 
 @task
-def running_up(scenario):
+def power_on(scenario):
+    print(scenario)
     """Power on all virtual machines of scenario"""
     for conf in POSTGRESQL_HOSTS[scenario]:
         vbox.running_up_and_wait(
