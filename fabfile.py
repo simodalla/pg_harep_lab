@@ -15,14 +15,17 @@ from postgresql import psql_cmd
 from utils.decorators import tmp_db
 from utils.files import sed
 from utils.config import *
+import scenario
 import vbox
 import ssh
-import scenario
+import superv
+
+
 from utils import get_random_string
 
 
-env.lab_vm_image_name = 'ubuntu1404'
-env.lab_vm_image_snapshot = 'post_installation'
+env.lab_vm_image_name = VM_IMAGE_NAME
+env.lab_vm_image_snapshot = VM_IMAGE_SNAPSHOT
 env.password = 'default'
 env.host = '192.168.59.200'
 
@@ -178,37 +181,6 @@ def deploy_simple_scenario(master_vm_name='pgsimplemaster',
                                     'network configuration for scenario')
 
 
-@hosts(VM_TEMPLATE_IP)
-@with_settings(user='root')
-@task
-def prepare_scenario(scenario):
-    for ip in POSTGRESQL_HOSTS[scenario]:
-        vm_name = POSTGRESQL_HOSTS[scenario][ip]['vm_name']
-        if not vbox.vm_exist(vm_name):
-            vbox.clone_vm(env.lab_vm_image_name, name=vm_name, options='link',
-                          snapshot='postgres_server_post_config')
-        if not vbox.has_snapshot(vm_name, 'network_config_for_scenario'):
-            success = vbox.running_up_and_wait(vm_name)
-            ssh.prepare_ssh_autologin()
-            with settings(user=POSTGRESQL_USERNAME):
-                ssh.prepare_ssh_autologin()
-                postgresql.add_bin_path()
-            sed('/etc/hostname', before='ubuntu1', after=vm_name)
-            sed('/etc/hosts', before='ubuntu1', after=vm_name)
-            for other_ip in [oi for oi in POSTGRESQL_HOSTS[scenario]
-                             if oi != ip]:
-                append('/etc/hosts', '{ip}  {hostname}'.format(
-                    ip=other_ip,
-                    hostname=POSTGRESQL_HOSTS[scenario][other_ip]['vm_name']))
-            sed('/etc/network/interfaces',
-                before="address {}".format(VM_TEMPLATE_IP),
-                after="address {}".format(ip))
-            if success:
-                vbox.make_snaspshot(vm_name,
-                                    'network_config_for_scenario',
-                                    'network configuration for scenario')
-
-
 @hosts('192.168.59.201', '192.168.59.202')
 @task
 def deploy_ptr_scenario():
@@ -260,7 +232,7 @@ def deploy_ptr_scenario():
 @hosts(VM_MASTER_IP)
 @with_settings(user=POSTGRESQL_USERNAME)
 @task
-def deploy_async_simple_master(archive=False):
+def deploy_async_master(archive=False):
     current_scenario = 'async'
     vm_name = POSTGRESQL_HOSTS[current_scenario][env.host]['vm_name']
     postgresql.add_bin_path()
@@ -297,14 +269,14 @@ def deploy_async_simple_master(archive=False):
                                 'set_archive_mode',
                                 'set archive mode')
 
-    # run_master_postgres('async')
+    run_master_postgres('async')
 
 
 @hosts(VM_SLAVE_IP)
 @with_settings(user=POSTGRESQL_USERNAME)
 @task
-def deploy_async_simple_slave(target_path=None, master=None,
-                              trigger_file=False, archive=False):
+def deploy_async_slave(target_path=None, master=None,
+                       trigger_file=False, archive=False):
     vm_name = POSTGRESQL_HOSTS['async'][env.host]['vm_name']
     master = master or VM_MASTER_IP
     vbox.running_up_and_wait(vm_name)
@@ -591,18 +563,20 @@ def watch_query(db=None, table=None):
     table = table or 't_test'
     if not db:
         abort('Specify database name!')
-    local('watch -n 1 "psql -h {} -U {} -d {} -c \'select * from {}\'"'.format(
-        env.host, POSTGRESQL_USERNAME, db, table))
+    local('watch -n 1 "psql -h {} -U {} -d {} -c \'select * from {}'
+          ' order by id desc\'"'.format(env.host, POSTGRESQL_USERNAME,
+                                        db, table))
 
 
 @task
 def insert_to_test(db=None, value=None, table=None, ):
     table = table or 't_test'
-    value = value or 'random()'
+    value = "'{}'".format(value) if value else "random()"
     if not db:
         abort('Specify database name!')
-    psql_cmd("INSERT INTO {} (name) VALUES ('{}')".format(table, value),
+    psql_cmd("INSERT INTO {} (name) VALUES ({})".format(table, value),
              db=db)
+
 
 @hosts(VM_MASTER_IP)
 @with_settings(user=POSTGRESQL_USERNAME)
@@ -622,6 +596,150 @@ COMMIT;
 EOF""".format(VM_MASTER_IP, POSTGRESQL_USERNAME, db, synchronous_commit))
 
 #### end synchronous replication scenario ###################################
+
+#### pgbouncer ################
+
+@hosts(VM_SLAVE_2_IP)
+@with_settings(user='root')
+@task
+def deploy_pgbouncer():
+    current_scenario = 'pgbouncer'
+    vm_name = POSTGRESQL_HOSTS[current_scenario][env.host]['vm_name']
+    vbox.running_up_and_wait(vm_name)
+    if not vbox.has_snapshot(vm_name, 'pgbouncer_installation'):
+        source_url = ('http://pgfoundry.org/frs/download.php/3393/'
+                      'pgbouncer-1.5.4.tar.gz')
+        run('apt-get update && apt-get install -y libevent-dev')
+        run('wget {}'.format(source_url))
+        pgbouncer_source_dir = '/opt/pgbouncer_1_5_4'
+        run('rm -rf ' + pgbouncer_source_dir)
+        run('mkdir {dir} && tar xvf {source} -C {dir}'
+            ' --strip-components=1'.format(dir=pgbouncer_source_dir,
+                                           source=source_url.split('/')[-1]))
+        with cd(pgbouncer_source_dir):
+            run('./configure')
+            run('make clean')
+            run('make install')
+        vbox.make_snaspshot(
+            vm_name, 'pgbouncer_installation', 'pgbouncer installation')
+
+#### end pgbouncer ################
+
+#### pgpool ####################
+@hosts(VM_SLAVE_2_IP)
+@with_settings(user='root')
+@task
+def deploy_pgpool():
+    current_scenario = 'pgpool_reply'
+    vm_name = POSTGRESQL_HOSTS[current_scenario][env.host]['vm_name']
+    source_url = ('http://www.pgpool.net/download.php?'
+                  'f=pgpool-II-3.4.0.tar.gz')
+    source_file = source_url.split('=')[-1]
+    source_dir = '/opt/{}'.format(
+        source_file.replace('.tar.gz', '').replace('.', '_'))
+
+    vbox.running_up_and_wait(vm_name)
+    if not vbox.has_snapshot(vm_name, 'pgpool_installation'):
+        postgresql.add_bin_path(user=env.user)
+        superv.install()
+        run('wget -O {} {}'.format(source_file, source_url))
+        run('rm -rf ' + source_dir)
+        run('mkdir {dir} && tar xvf {source} -C {dir}'
+            ' --strip-components=1'.format(dir=source_dir,
+                                           source=source_file))
+        with cd(source_dir):
+            run('./configure --with-pgsql={}'.format(POSTGRESQL_ROOT_PATH))
+            run('make clean')
+            run('make install')
+        run('ldconfig /usr/local/lib/')
+        with cd(os.path.join(source_dir, 'src', 'sql', 'pgpool-regclass')):
+            run('make')
+            run('make install')
+        with cd('/usr/local/etc/'):
+            for pgpool_conf in ['pgpool.local_replication.conf',
+                                'pgpool.async_replication.conf']:
+                run('cp pgpool.conf.sample {}'.format(pgpool_conf))
+                sed(pgpool_conf,
+                    "listen_addresses = 'localhost'",
+                    "listen_addresses = '*'")
+                for var in ['backend_hostname1', 'backend_port1',
+                            'backend_weight1', 'backend_data_directory1',
+                            'backend_flag1']:
+                    uncomment(pgpool_conf, var)
+                if 'local' in pgpool_conf:
+                    sed(pgpool_conf,
+                        'replication_mode = off',
+                        'replication_mode = on')
+                elif 'async' in pgpool_conf:
+                    sed(pgpool_conf,
+                        'master_slave_mode = off',
+                        'master_slave_mode = on')
+                    sed(pgpool_conf,
+                        "master_slave_sub_mode = 'slony'",
+                        "master_slave_sub_mode = 'stream'")
+                    sed(pgpool_conf,
+                        "backend_hostname0 = 'localhost'",
+                        "backend_hostname0 = '{}'".format(VM_MASTER_IP))
+                    sed(pgpool_conf,
+                        "backend_hostname1 = 'host2'",
+                        "backend_hostname1 = '{}'".format(VM_SLAVE_IP))
+                    sed(pgpool_conf,
+                        "backend_port1 = 5433",
+                        "backend_port1 = 5432")
+                    sed(pgpool_conf,
+                        "backend_data_directory1 = '/data1'",
+                        "backend_data_directory1 = '{}'".format(
+                            os.path.join(POSTGRESQL_STORAGE_PATH,
+                                         'async_pgpool')))
+                sed(pgpool_conf,
+                    'load_balance_mode = off',
+                    'load_balance_mode = on')
+            run('touch pcp.conf')
+            for user in ['user1', 'user2', POSTGRESQL_USERNAME]:
+                append('pcp.conf',
+                       '{}:c21f969b5f03d33d43e04f8f136e7682'.format(user))
+        run('mkdir /var/run/pgpool/')
+        vbox.make_snaspshot(
+            vm_name, 'pgpool_installation', 'pgpool installation')
+
+    vbox.running_up_and_wait(vm_name)
+    if not vbox.has_snapshot(vm_name, 'local_replication'):
+        with settings(user=POSTGRESQL_USERNAME):
+            for i in range(1, 3):
+                instance_name = 'pgdb{}'.format(i)
+                data_dir = os.path.join(POSTGRESQL_STORAGE_PATH, instance_name)
+                port = 5432 + i
+                run('mkdir {}'.format(data_dir))
+                run('initdb -D {}'.format(data_dir))
+                with cd(data_dir):
+                    config_file = os.path.split(POSTGRESQL_CONFIG_FILE)[-1]
+                    uncomment(config_file, 'listen_addresses = ')
+                    sed(config_file,
+                        "listen_addresses = 'localhost'",
+                        "listen_addresses = '*'")
+                    uncomment(config_file, 'port = ')
+                    sed(config_file,
+                        "port = 5432",
+                        "port = {}".format(port))
+                with settings(user='root'):
+                    print(colors.red("current user: %s" % env.user))
+                    superv.add_postgres_program(program=instance_name,
+                                                datadir=data_dir,
+                                                autostart=True)
+                    run('supervisorctl reread')
+                    run('supervisorctl reload')
+                time.sleep(3)
+                with cd(os.path.join(source_dir, 'src', 'sql')):
+                    print(colors.red("current user: %s" % env.user))
+                    run('psql -p {} -f insert_lock.sql template1'.format(port))
+                    run('psql -p {} -f pgpool-regclass/pgpool-regclass.sql'
+                        ' template1'.format(port))
+        vbox.make_snaspshot(
+            vm_name, 'local_replication', 'local_replication')
+    vbox.running_up_and_wait(vm_name)
+#### end pgpool ################
+
+
 
 @task
 def demo_random():

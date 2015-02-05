@@ -46,8 +46,8 @@ def run_interactive(datapath=None):
 
 
 @task
-def add_bin_path():
+def add_bin_path(user=POSTGRESQL_USERNAME):
     bin_path = os.path.join(POSTGRESQL_ROOT_PATH, 'bin')
-    with settings(user=POSTGRESQL_USERNAME):
+    with settings(user=user):
         if not contains('~/.profile', bin_path):
             append('~/.profile', '\n\nPATH="{}:$PATH"'.format(bin_path))

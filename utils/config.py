@@ -3,6 +3,8 @@ from __future__ import unicode_literals, absolute_import
 
 import os.path
 
+VM_IMAGE_NAME = 'ubuntu1404'
+VM_IMAGE_SNAPSHOT = 'post_installation'
 VM_NETWORK = '192.168.59'
 VM_TEMPLATE_IP = '.'.join([VM_NETWORK, '200'])
 VM_MASTER_IP = '.'.join([VM_NETWORK, '201'])
@@ -55,12 +57,29 @@ POSTGRESQL_HOSTS = {
     'sync': {
         VM_MASTER_IP: {
             'vm_name': 'pgsyncmaster',
-            'archive_path': os.path.join(POSTGRESQL_STORAGE_PATH,
-                                         'sync_archive'),
             'application_name': 'sync_scenario',
         },
         VM_SLAVE_IP: {
             'vm_name': 'pgsyncslave',
         },
+        VM_SLAVE_2_IP: {
+            'vm_name': 'pgsyncslave2',
+        },
+    },
+    'pgbouncer': {
+        VM_SLAVE_2_IP: {
+            'vm_name': 'pgbouncer',
+        }
+    },
+    'pgpool_reply': {
+        VM_MASTER_IP: {
+            'vm_name': 'pgpoolasynmaster',
+        },
+        VM_SLAVE_IP: {
+            'vm_name': 'pgpoolasynslave',
+        },
+        VM_SLAVE_2_IP: {
+            'vm_name': 'pgpooler',
+        }
     }
 }

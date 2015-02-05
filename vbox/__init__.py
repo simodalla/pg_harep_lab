@@ -78,6 +78,7 @@ def wait_for_up():
     return False
 
 
+@api.task
 def wait_for_down(vm_name):
     for attempt in range(0, 15):
         status = get_vm_status(vm_name)
@@ -88,6 +89,7 @@ def wait_for_down(vm_name):
     return False
 
 
+@api.task
 def running_up_and_wait(vm_name, wait=True):
     if get_vm_status(vm_name) == 'poweroff':
         vbox_manage('startvm', vm_name, type='headless')
@@ -97,6 +99,7 @@ def running_up_and_wait(vm_name, wait=True):
     return True
 
 
+@api.task
 def power_off_and_wait(vm_name):
     if vm_exist(vm_name) and get_vm_status(vm_name) == 'running':
         vbox_manage('controlvm', vm_name, 'acpipowerbutton')
