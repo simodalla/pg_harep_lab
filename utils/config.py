@@ -3,8 +3,8 @@ from __future__ import unicode_literals, absolute_import
 
 import os.path
 
-# VM_IMAGE_NAME = 'ubuntu1404'
-VM_IMAGE_NAME = 'ubuntu1404p94'
+VM_IMAGE_NAME = 'ubuntu1404p93'
+# VM_IMAGE_NAME = 'ubuntu1404p94'
 VM_IMAGE_SNAPSHOT = 'post_installation'
 VM_NETWORK = '192.168.59'
 VM_TEMPLATE_IP = '.'.join([VM_NETWORK, '200'])
@@ -74,16 +74,26 @@ POSTGRESQL_HOSTS = {
     },
     'pgpool_replication': {
         VM_MASTER_IP: {
-            'vm_name': 'pgpoolasynmaster',
+            'vm_name': 'osspc17',
         },
         VM_SLAVE_IP: {
-            'vm_name': 'pgpoolasynslave',
+            'vm_name': 'osspc18',
         },
         VM_SLAVE_2_IP: {
-            'vm_name': 'pgpooler',
+            'vm_name': 'osspc16',
         }
     },
     'pg94simple': {
         VM_MASTER_IP: {'vm_name': 'pg94simple'},
+    },
+    'pg94async': {
+        VM_MASTER_IP: {
+            'vm_name': 'pg94asynmaster',
+            'archive_path': os.path.join(POSTGRESQL_STORAGE_PATH,
+                                         'async_archive'),
+        },
+        VM_SLAVE_IP: {
+            'vm_name': 'pg94asynslave',
+        },
     }
 }

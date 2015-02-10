@@ -5,7 +5,7 @@ import os.path
 import utils.config as config
 from fabric.api import settings, run, task, with_settings, abort
 from fabric.contrib.files import exists, append
-
+from fabric import colors
 
 SUPERVISOR_CONFD_PATH = '/etc/supervisor/conf.d/'
 
@@ -32,16 +32,19 @@ def add_program(program, command, user=None, autostart=True):
         for row in rows:
             if row:
                 append(config_path, row)
+        return True
     else:
-        abort('Supervisor conf for {} already exist!'.format(program))
+        print(colors.red('Supervisor conf for {} already'
+                         ' exist!'.format(program)))
+    return False
 
 
 @task
 def add_postgres_program(program=config.POSTGRESQL_USERNAME,
                          datadir=config.POSTGRESQL_DATA_PATH,
                          autostart=True):
-    add_program(program,
-                command='{} -D {}'.format(config.POSTGRESQL_CMD_SERVER,
-                                          datadir),
-                user=config.POSTGRESQL_USERNAME,
-                autostart=autostart)
+    return add_program(program,
+                       command='{} -D {}'.format(config.POSTGRESQL_CMD_SERVER,
+                                                 datadir),
+                       user=config.POSTGRESQL_USERNAME,
+                       autostart=autostart)

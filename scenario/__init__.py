@@ -12,6 +12,7 @@ from postgresql import add_bin_path
 from utils.config import *
 from utils.files import sed
 
+from fabfile import env
 
 @hosts(VM_TEMPLATE_IP)
 @with_settings(user='root')
@@ -20,7 +21,7 @@ def prepare(scenario):
     for ip in POSTGRESQL_HOSTS[scenario]:
         vm_name = POSTGRESQL_HOSTS[scenario][ip]['vm_name']
         if not vm_exist(vm_name):
-            clone_vm(VM_IMAGE_NAME, name=vm_name, options='link',
+            clone_vm(env.lab_vm_image_name, name=vm_name, options='link',
                      snapshot='postgres_server_post_config')
         if not has_snapshot(vm_name, 'network_config_for_scenario'):
             success = running_up_and_wait(vm_name)
