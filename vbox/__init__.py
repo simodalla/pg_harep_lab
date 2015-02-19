@@ -106,11 +106,14 @@ def power_off_and_wait(vm_name):
         wait_for_down(vm_name)
 
 
-def make_snaspshot(vm_name, snapshot_name, snapshot_description):
-    power_off_and_wait(vm_name)
-    vbox_manage('snapshot', vm_name, 'take',
-                snapshot_name,
-                description='"{}"'.format(snapshot_description))
+@api.task
+def make_snapshot(vm_name, snapshot_name, snapshot_description=None):
+    if not has_snapshot(vm_name, snapshot_name):
+        power_off_and_wait(vm_name)
+        snapshot_description = snapshot_description or snapshot_name
+        vbox_manage('snapshot', vm_name, 'take',
+                    snapshot_name,
+                    description='"{}"'.format(snapshot_description))
 
 
 @api.task

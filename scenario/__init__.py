@@ -5,7 +5,7 @@ from fabric.api import task, hosts, run, with_settings, settings
 from fabric.contrib.files import append
 
 from vbox import (vm_exist, clone_vm, has_snapshot, running_up_and_wait,
-                  make_snaspshot, power_off_and_wait, delete_vm)
+                  make_snapshot, power_off_and_wait, delete_vm)
 from ssh import prepare_ssh_autologin
 from postgresql import add_bin_path
 
@@ -17,12 +17,13 @@ from fabfile import env
 @hosts(VM_TEMPLATE_IP)
 @with_settings(user='root')
 @task
-def prepare(scenario):
+def prepare(scenario, vm_image=None, snapshot=None):
+    vm_image = vm_image or env.lab_vm_image_name
+    snapshot = snapshot or 'postgres_server_post_config'
     for ip in POSTGRESQL_HOSTS[scenario]:
         vm_name = POSTGRESQL_HOSTS[scenario][ip]['vm_name']
         if not vm_exist(vm_name):
-            clone_vm(env.lab_vm_image_name, name=vm_name, options='link',
-                     snapshot='postgres_server_post_config')
+            clone_vm(vm_image, name=vm_name, options='link', snapshot=snapshot)
         if not has_snapshot(vm_name, 'network_config_for_scenario'):
             success = running_up_and_wait(vm_name)
             prepare_ssh_autologin()
@@ -40,7 +41,7 @@ def prepare(scenario):
                 before="address {}".format(VM_TEMPLATE_IP),
                 after="address {}".format(ip))
             if success:
-                make_snaspshot(vm_name,
+                make_snapshot(vm_name,
                                'network_config_for_scenario',
                                'network configuration for scenario')
 
@@ -72,10 +73,24 @@ def delete(scenario):
 @hosts(VM_MASTER_IP)
 @with_settings(user=POSTGRESQL_USERNAME, warn_olny=True)
 def ssh_autologin(scenario):
+    run('ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa')
+    run('cat .ssh/id_rsa.pub >> .ssh/authorized_keys')
+    for host in POSTGRESQL_HOSTS[scenario]:
+        if host != VM_MASTER_IP:
+            run('rsync -azvh .ssh  {}@{}:'.format(env.user, host))
+            run('cat .ssh/id_rsa.pub >> .ssh/authorized_keys')
+
+@task
+@hosts(VM_MASTER_IP, VM_SLAVE_IP, VM_SLAVE_2_IP, VM_SLAVE_3_IP)
+@with_settings(user='root', warn_olny=True)
+def ssh_autologin_root(scenario):
     with settings(warn_only=True):
-        run('ssh-keygen -t rsa -N "" -f ~/.ssh/id_rsa')
-        run('cat .ssh/id_rsa.pub >> .ssh/authorized_keys')
-        for host in POSTGRESQL_HOSTS[scenario]:
-            if host != VM_MASTER_IP:
-                run('rsync -azvh .ssh  postgres@{}:'.format(host))
-                run('cat .ssh/id_rsa.pub >> .ssh/authorized_keys')
+        run('rm -rf {}/ssh/*'.format(env.user))
+        run('cp -R /home/{}/.ssh/* /{}/.ssh'.format(POSTGRESQL_USERNAME,
+                                                    env.user))
+
+    # for host in POSTGRESQL_HOSTS[scenario]:
+    #     # with settings(warn_only=True, user='root'):
+    #     # if host != VM_MASTER_IP:
+    #     run('rsync -azvh .ssh  {}@{}:'.format(env.user, host))
+    #     run('cat .ssh/id_rsa.pub >> .ssh/authorized_keys')

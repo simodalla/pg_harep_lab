@@ -78,6 +78,50 @@ def simple_master_psql():
     psql_shell()
 
 
+@hosts(VM_TEMPLATE_IP)
+@with_settings(user='root')
+@task
+def pre_deploy_cityware(version='9.3.6'):
+    vbox.running_up_and_wait(env.lab_vm_image_name)
+    if not vbox.has_snapshot(env.lab_vm_image_name,
+                             'pre_deploy_cityware'):
+        vbox.make_snapshot(env.lab_vm_image_name, 'pre_deploy_cityware')
+    vbox.running_up_and_wait(env.lab_vm_image_name)
+    if not vbox.has_snapshot(env.lab_vm_image_name, 'apt_update_upgrade'):
+        run('apt-get update && apt-get upgrade -y')
+        vbox.make_snapshot(env.lab_vm_image_name, 'apt_update_upgrade')
+    vbox.running_up_and_wait(env.lab_vm_image_name)
+    if not vbox.has_snapshot(env.lab_vm_image_name,
+                             'configure_locale_cityware'):
+        append('/var/lib/locales/supported.d/local',
+               'it_IT.ISO-8859-15 ISO-8859-15')
+        run('dpkg-reconfigure --force locales')
+        sed('/etc/default/locale ',
+            before='LANG="it_IT.UTF-8"',
+            after='LANG="it_IT.ISO-8859-15"')
+        vbox.power_off_and_wait(env.lab_vm_image_name)
+        vbox.running_up_and_wait(env.lab_vm_image_name)
+        run('locale')
+        vbox.make_snapshot(env.lab_vm_image_name,
+                            'configure_locale_cityware')
+
+
+@hosts(VM_TEMPLATE_IP)
+@with_settings(user='root')
+@task
+def post_deploy_cityware(version='9.3.6'):
+    vbox.running_up_and_wait(env.lab_vm_image_name)
+    if not vbox.has_snapshot(env.lab_vm_image_name,
+                             'post_deploy_cityware'):
+        run('chown {postgres}:{postgres} -R {path}'.format(
+            postgres=POSTGRESQL_USERNAME,
+            path=os.path.split(POSTGRESQL_DATA_PATH)[0]))
+        with settings(user=POSTGRESQL_USERNAME):
+            run('mkdir -p {}'.format(
+                os.path.join(os.path.split(POSTGRESQL_DATA_PATH)[0],
+                             'tlbsp_cityware')))
+        vbox.make_snapshot(env.lab_vm_image_name, 'post_deploy_cityware')
+
 
 @hosts(VM_TEMPLATE_IP)
 @with_settings(user='root')
@@ -88,7 +132,7 @@ def deploy_postgres_image(version='9.3.6'):
                              'autologin_and_apt_update'):
         ssh.prepare_ssh_autologin()
         run('apt-get update && apt-get upgrade -y')
-        vbox.make_snaspshot(env.lab_vm_image_name,
+        vbox.make_snapshot(env.lab_vm_image_name,
                             'autologin_and_apt_update',
                             'autologin_and_apt_update')
     vbox.running_up_and_wait(env.lab_vm_image_name)
@@ -119,27 +163,28 @@ def deploy_postgres_image(version='9.3.6'):
             run('make')
             run('make install')
 
-        vbox.make_snaspshot(env.lab_vm_image_name,
+        vbox.make_snapshot(env.lab_vm_image_name,
                             SNAPSHOTS['POSTGRES_SOURCE_INSTALL'],
                             'snapshot post installation from source')
 
     if not vbox.has_snapshot(env.lab_vm_image_name, 'postgres_user_config'):
         vbox.running_up_and_wait(env.lab_vm_image_name)
-        run('adduser --quiet --disabled-password --gecos "Postgres User"'
-            ' {}'.format(POSTGRESQL_USERNAME))
-        run('echo "{}:{}" | chpasswd'.format(POSTGRESQL_USERNAME,
-                                             env.password))
+        with settings(warn_only=True):
+            run('adduser --quiet --disabled-password --gecos "Postgres User"'
+                ' {}'.format(POSTGRESQL_USERNAME))
+            run('echo "{}:{}" | chpasswd'.format(POSTGRESQL_USERNAME,
+                                                 env.password))
         for path in [POSTGRESQL_DATA_PATH, POSTGRESQL_LOG_PATH,
                      POSTGRESQL_STORAGE_PATH]:
             if not exists(path):
-                run('mkdir {}'.format(path))
-            run('chown {postgres}:{postgres} {path}'.format(
+                run('mkdir -p {}'.format(path))
+            run('chown -R {postgres}:{postgres} {path}'.format(
                 postgres=POSTGRESQL_USERNAME, path=path))
         postgresql.add_bin_path()
         with settings(user=POSTGRESQL_USERNAME):
             postgresql.add_bin_path()
             ssh.prepare_ssh_autologin()
-        vbox.make_snaspshot(env.lab_vm_image_name,
+        vbox.make_snapshot(env.lab_vm_image_name,
                             'postgres_user_config',
                             'snapshot post postgres user configuration')
 
@@ -148,7 +193,7 @@ def deploy_postgres_image(version='9.3.6'):
         vbox.running_up_and_wait(env.lab_vm_image_name)
         with settings(user=POSTGRESQL_USERNAME):
             run('ls -l {}'.format(POSTGRESQL_DATA_PATH))
-            run('{} -D {} -E unicode'.format(
+            run('{} -D {}'.format(
                 os.path.join(POSTGRESQL_ROOT_PATH, 'bin/initdb'),
                 POSTGRESQL_DATA_PATH))
 
@@ -165,14 +210,15 @@ def deploy_postgres_image(version='9.3.6'):
 
             postgres_conf = os.path.join(POSTGRESQL_DATA_PATH,
                                          'postgresql.conf')
-            for parameter in ['listen_addresses', 'checkpoint_segments',
-                              'checkpoint_timeout', 'checkpoint_warning',
-                              'checkpoint_completion_target',
+            for parameter in ['listen_addresses', 'log_line_prefix',
                               'log_destination', 'logging_collector',
                               'log_directory', 'log_filename',
                               'log_file_mode', 'log_truncate_on_rotation',
                               'log_rotation_age', 'log_rotation_size',
-                              'log_duration']:
+                              'log_duration', 'log_checkpoints',
+                              'log_connections', 'log_disconnections',
+                              'log_error_verbosity', 'log_hostname',
+                              'log_statement']:
                 uncomment(postgres_conf, '{} = '.format(parameter))
             sed(postgres_conf,
                 "listen_addresses = 'localhost'",
@@ -182,20 +228,34 @@ def deploy_postgres_image(version='9.3.6'):
                 "logging_collector = on")
             sed(postgres_conf,
                 "log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'",
-                # "log_filename = 'postgresql.log'")
-                "log_filename = '%A.log'")
+                "log_filename = 'postgresql.log'")
             sed(postgres_conf,
                 "log_statement = 'none'",
                 "log_statement = 'all'")
             sed(postgres_conf,
+                "log_checkpoints = off",
+                "log_checkpoints = on")
+            sed(postgres_conf,
+                "log_connections = off",
+                "log_connections = on")
+            sed(postgres_conf,
+                "log_hostname = off",
+                "log_hostname = on")
+            sed(postgres_conf,
+                "log_duration = off",
+                "log_duration = on")
+            sed(postgres_conf,
+                "log_disconnections = off",
+                "log_disconnections = on")
+            sed(postgres_conf,
                 "log_line_prefix = ''",
-                "log_line_prefix = '[%t-%d-%p-%u-%h]'")
+                "log_line_prefix = '[%t-%h]'")
 
         superv.install()
         superv.add_postgres_program(program='postgres',
                                     datadir=POSTGRESQL_DATA_PATH,
-                                    autostart=True)
-        vbox.make_snaspshot(env.lab_vm_image_name,
+                                    autostart=False)
+        vbox.make_snapshot(env.lab_vm_image_name,
                             'postgres_server_post_config',
                             'snapshot post postgres server configuration')
 
@@ -227,7 +287,7 @@ def deploy_simple_scenario(master_vm_name='pgsimplemaster',
                     before="address 192.168.59.200",
                     after="address 192.168.59.202",)
             if success:
-                vbox.make_snaspshot(vm_name,
+                vbox.make_snapshot(vm_name,
                                     'network_config_for_scenario',
                                     'network configuration for scenario')
 
@@ -275,7 +335,7 @@ def deploy_ptr_scenario():
                 run('mkdir {}'.format(
                     POSTGRESQL_HOSTS['ptr'][env.host]['base_backup_path']))
         if success:
-            vbox.make_snaspshot(vm_name,
+            vbox.make_snapshot(vm_name,
                                 'activation_archiving_transaction_log',
                                 'activation archiving transaction log')
 
@@ -298,7 +358,7 @@ def deploy_async_master(archive=False, current_scenario='async'):
             uncomment(POSTGRESQL_CONFIG_FILE, 'max_wal_senders =')
             sed(POSTGRESQL_CONFIG_FILE,
                 "max_wal_senders = 0",
-                "max_wal_senders = 15")
+                "max_wal_senders = 5")
             uncomment(POSTGRESQL_CONFIG_FILE, 'wal_keep_segments =')
             sed(POSTGRESQL_CONFIG_FILE,
                 "wal_keep_segments = 0",
@@ -308,10 +368,11 @@ def deploy_async_master(archive=False, current_scenario='async'):
             sed(POSTGRESQL_CONFIG_FILE,
                 'hot_standby = off',
                 'hot_standby = on')
-        vbox.make_snaspshot(vm_name,
+        vbox.make_snapshot(vm_name,
                             'set_aysnc_replication',
                             'set aysnc replication')
     if archive:
+        vbox.running_up_and_wait(vm_name)
         if not vbox.has_snapshot(vm_name,
                                  'set_archive_mode'):
             archive_path = POSTGRESQL_HOSTS[current_scenario][env.host][
@@ -325,7 +386,7 @@ def deploy_async_master(archive=False, current_scenario='async'):
             sed(POSTGRESQL_CONFIG_FILE,
                 before="archive_command = ''",
                 after="archive_command = 'cp %p {}/%f'".format(archive_path))
-            vbox.make_snaspshot(vm_name,
+            vbox.make_snapshot(vm_name,
                                 'set_archive_mode',
                                 'set archive mode')
     vbox.running_up_and_wait(vm_name)
@@ -342,8 +403,15 @@ def deploy_async_master(archive=False, current_scenario='async'):
 def deploy_async_slave(target_path=None, master=None,
                        trigger_file=False, archive=False,
                        current_scenario='async',
-                       autorecovery=False):
+                       autorecovery=False,
+                       stream=True,
+                       application_name=None):
     autorecovery = bool(autorecovery)
+    stream = bool(stream)
+    archive = bool(archive)
+    trigger_file = bool(trigger_file)
+    # print(autorecovery, stream, archive, trigger_file)
+    # return
     vm_name = POSTGRESQL_HOSTS[current_scenario][env.host]['vm_name']
     master = master or VM_MASTER_IP
     vbox.running_up_and_wait(vm_name)
@@ -357,13 +425,13 @@ def deploy_async_slave(target_path=None, master=None,
         run('mkdir {path} && chmod 700 {path}'.format(path=target_path))
         pg_basebackup_cmd = os.path.join(
             POSTGRESQL_ROOT_PATH, 'bin', 'pg_basebackup')
-        run('{cmd} -h {master} -D {data} {autorecovery} '
-            '--xlog-method=stream'.format(
+        run('{cmd} -h {master} -D {data} {autorecovery} --checkpoint=fast'
+            ' --xlog-method=stream'.format(
                 cmd=pg_basebackup_cmd, master=master, data=target_path,
                 autorecovery='-R' if autorecovery else ''))
         with cd(target_path):
+            recovery_file = 'recovery.conf'
             if not autorecovery:
-                recovery_file = 'recovery.conf'
                 if not exists(recovery_file):
                     run('touch {}'.format(recovery_file))
                 else:
@@ -381,30 +449,35 @@ def deploy_async_slave(target_path=None, master=None,
                                          VM_MASTER_IP,
                                          archive_path))
                 append(recovery_file, 'standby_mode = on')
-                append(recovery_file,
-                       "primary_conninfo= ' host={} port=5432 '".format(
-                           master))
+                if stream:
+                    conninfo = "primary_conninfo= ' host={} port=5432".format(
+                        master)
+                    if application_name:
+                        conninfo += ' application_name={}'.format(
+                            application_name)
+                    append(recovery_file, conninfo + "'")
                 # # making slave readable (pag. 82)
                 # uncomment('postgresql.conf', 'hot_standby =')
                 # sed('postgresql.conf', 'hot_standby = off',
                 #     'hot_standby = on')
-                if trigger_file:
-                    if not contains(recovery_file, 'trigger_file'):
-                        append(recovery_file,
-                               "trigger_file = '/tmp/start_me_up.txt'")
+            if trigger_file:
+                if not contains(recovery_file, 'trigger_file'):
+                    append(recovery_file,
+                           "trigger_file = '{}'".format(
+                               os.path.join(POSTGRESQL_DATA_PATH, 'trigger')))
 
     vbox.running_up_and_wait(vm_name)
-    with settings(user='root'):
-        if superv.add_postgres_program(program='postgres_async',
-                                       datadir=target_path,
-                                       autostart=False):
-            sed('/etc/supervisor/conf.d/postgres.conf',
-                before="autostart=True", after="autostart=False")
-            run('supervisorctl reread')
-            run('supervisorctl reload')
-            run('supervisorctl stop postgres')
-            time.sleep(2)
-            run('supervisorctl start postgres_async')
+    # with settings(user='root'):
+    #     if superv.add_postgres_program(program='postgres_async',
+    #                                    datadir=target_path,
+    #                                    autostart=False):
+    #         sed('/etc/supervisor/conf.d/postgres.conf',
+    #             before="autostart=True", after="autostart=False")
+    #         run('supervisorctl reread')
+    #         run('supervisorctl reload')
+    #         run('supervisorctl stop postgres')
+    #         time.sleep(2)
+    #         run('supervisorctl start postgres_async')
     # postgresql.run_interactive(datapath=target_path)
 
 
@@ -525,8 +598,8 @@ def test_async_cluster():
 @hosts(VM_MASTER_IP)
 @with_settings(user=POSTGRESQL_USERNAME)
 @task
-def deploy_sync_master(archive=False):
-    current_scenario = 'sync'
+def deploy_sync_master(archive=False, current_scenario=None):
+    current_scenario = current_scenario or 'sync'
     vm_name = POSTGRESQL_HOSTS[current_scenario][env.host]['vm_name']
     application_name = POSTGRESQL_HOSTS[current_scenario][env.host][
         'application_name']
@@ -553,12 +626,12 @@ def deploy_sync_master(archive=False):
         uncomment(POSTGRESQL_CONFIG_FILE, 'wal_keep_segments =')
         sed(POSTGRESQL_CONFIG_FILE,
             'wal_keep_segments = 0',
-            'wal_keep_segments = 500')
-        vbox.make_snaspshot(vm_name,
+            'wal_keep_segments = 1000')
+        vbox.make_snapshot(vm_name,
                             'set_aysnc_replication',
                             'set aysnc replication')
         vbox.running_up_and_wait(vm_name)
-    run_master_postgres(current_scenario)
+    # run_master_postgres(current_scenario)
 
 @hosts(VM_SLAVE_IP)
 @with_settings(user=POSTGRESQL_USERNAME)
@@ -701,13 +774,13 @@ def deploy_pgbouncer():
             run('./configure')
             run('make clean')
             run('make install')
-        vbox.make_snaspshot(
+        vbox.make_snapshot(
             vm_name, 'pgbouncer_installation', 'pgbouncer installation')
 
 #### end pgbouncer ################
 
 #### pgpool ####################
-@hosts(VM_SLAVE_2_IP)
+@hosts(VM_SLAVE_IP, VM_SLAVE_2_IP, VM_SLAVE_3_IP)
 @with_settings(user='root')
 @task
 def deploy_pgpool(current_scenario='pgpool_replication'):
@@ -717,25 +790,37 @@ def deploy_pgpool(current_scenario='pgpool_replication'):
     source_file = source_url.split('=')[-1]
     source_dir = '/opt/source/{}'.format(
         source_file.replace('.tar.gz', '').replace('.', '_'))
-
+    pgpool_indstall_dir = '/opt/pgpool'
     vbox.running_up_and_wait(vm_name)
     if not vbox.has_snapshot(vm_name, 'pgpool_installation'):
         postgresql.add_bin_path(user=env.user)
-        superv.install()
+        # superv.install()
         run('wget -O {} {}'.format(source_file, source_url))
         run('rm -rf ' + source_dir)
         run('mkdir -p {dir} && tar xvf {source} -C {dir}'
             ' --strip-components=1'.format(dir=source_dir,
                                            source=source_file))
         with cd(source_dir):
-            run('./configure --with-pgsql={}'.format(POSTGRESQL_ROOT_PATH))
+            run('./configure --prefix={} --with-pgsql={}'.format(
+                pgpool_indstall_dir, POSTGRESQL_ROOT_PATH))
             run('make clean')
             run('make install')
         run('ldconfig /usr/local/lib/')
-        run('mkdir /var/run/pgpool/')
-        # with cd(os.path.join(source_dir, 'src', 'sql', 'pgpool-regclass')):
-        #     run('make')
-        #     run('make install')
+        for path in ['/var/run/pgpool/', '/var/log/pgpool/',
+                     pgpool_indstall_dir]:
+            if not exists(path):
+                run('mkdir {}'.format(path))
+            run('chown -R {}:{} {}'.format(POSTGRESQL_USERNAME,
+                                           POSTGRESQL_USERNAME,
+                                           path))
+        pgpool_env = '/etc/profile.d/pgpool.sh'
+        if not exists(pgpool_env):
+            run('touch {}'.format(pgpool_env))
+            append(pgpool_env, "export PATH={}/bin:$PATH".format(
+                pgpool_indstall_dir))
+        with cd(os.path.join(source_dir, 'src', 'sql')):
+            run('make')
+            run('make install')
         # with cd('/usr/local/etc/'):
         #     for pgpool_conf in ['pgpool.local_replication.conf',
         #                         'pgpool.async_replication.conf']:
@@ -782,7 +867,7 @@ def deploy_pgpool(current_scenario='pgpool_replication'):
         #     for user in ['user1', 'user2', POSTGRESQL_USERNAME]:
         #         append('pcp.conf',
         #                '{}:c21f969b5f03d33d43e04f8f136e7682'.format(user))
-        vbox.make_snaspshot(
+        vbox.make_snapshot(
             vm_name, 'pgpool_installation', 'pgpool installation')
 
     # vbox.running_up_and_wait(vm_name)
@@ -838,7 +923,7 @@ def deploy_pgpool(current_scenario='pgpool_replication'):
     #                 run('psql -p {} -f insert_lock.sql template1'.format(port))
     #                 run('psql -p {} -f pgpool-regclass/pgpool-regclass.sql'
     #                     ' template1'.format(port))
-    #     vbox.make_snaspshot(
+    #     vbox.make_snapshot(
     #         vm_name, 'local_replication', 'local_replication')
     vbox.running_up_and_wait(vm_name)
 
